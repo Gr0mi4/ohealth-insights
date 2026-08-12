@@ -117,7 +117,7 @@ class HealthExportEngine(
                 jsonObjectV3(
                     "kind" to "manifest",
                     "schemaVersion" to 3,
-                    "appVersion" to "0.3.0",
+                    "appVersion" to "0.3.1",
                     "syncMode" to plan.mode.wireName,
                     "exportedAt" to exportedAt.toString(),
                     "fullHistoryPermission" to hasHistory,
@@ -503,27 +503,35 @@ class HealthExportEngine(
 
         val zone = ZoneId.systemDefault()
         val localStart = LocalDateTime.ofInstant(range.start, zone).toLocalDate().atStartOfDay()
-        val localEnd = LocalDateTime.ofInstant(range.end, zone).toLocalDate().plusDays(1).atStartOfDay()
+        val localEnd = LocalDateTime.ofInstant(range.end.minusNanos(1), zone)
+            .toLocalDate()
+            .plusDays(1)
+            .atStartOfDay()
+        val aggregationWindows = dailyAggregationWindows(localStart, localEnd)
         val metrics = mutableSetOf<AggregateMetric<*>>().apply {
             if (canReadSteps) add(StepsRecord.COUNT_TOTAL)
             if (canReadCalories) add(TotalCaloriesBurnedRecord.ENERGY_TOTAL)
         }
-        val totals = client.aggregateGroupByPeriod(
-            AggregateGroupByPeriodRequest(
-                metrics = metrics,
-                timeRangeFilter = TimeRangeFilter.between(localStart, localEnd),
-                timeRangeSlicer = Period.ofDays(1),
-            ),
-        ).associateBy { it.startTime.toLocalDate() }
-        val ohealthSteps = if (canReadSteps) {
+        val totals = aggregationWindows.flatMap { window ->
             client.aggregateGroupByPeriod(
                 AggregateGroupByPeriodRequest(
-                    metrics = setOf(StepsRecord.COUNT_TOTAL),
-                    timeRangeFilter = TimeRangeFilter.between(localStart, localEnd),
+                    metrics = metrics,
+                    timeRangeFilter = TimeRangeFilter.between(window.first, window.second),
                     timeRangeSlicer = Period.ofDays(1),
-                    dataOriginFilter = setOf(DataOrigin(ohealthPackage)),
                 ),
-            ).associateBy { it.startTime.toLocalDate() }
+            )
+        }.associateBy { it.startTime.toLocalDate() }
+        val ohealthSteps = if (canReadSteps) {
+            aggregationWindows.flatMap { window ->
+                client.aggregateGroupByPeriod(
+                    AggregateGroupByPeriodRequest(
+                        metrics = setOf(StepsRecord.COUNT_TOTAL),
+                        timeRangeFilter = TimeRangeFilter.between(window.first, window.second),
+                        timeRangeSlicer = Period.ofDays(1),
+                        dataOriginFilter = setOf(DataOrigin(ohealthPackage)),
+                    ),
+                )
+            }.associateBy { it.startTime.toLocalDate() }
         } else {
             emptyMap()
         }
@@ -549,6 +557,20 @@ class HealthExportEngine(
         }
         writer.flush()
         return dates.size.toLong()
+    }
+
+    private fun dailyAggregationWindows(
+        start: LocalDateTime,
+        end: LocalDateTime,
+    ): List<Pair<LocalDateTime, LocalDateTime>> {
+        val windows = mutableListOf<Pair<LocalDateTime, LocalDateTime>>()
+        var windowStart = start
+        while (windowStart < end) {
+            val windowEnd = minOf(windowStart.plusDays(dailyAggregationChunkDays), end)
+            windows += windowStart to windowEnd
+            windowStart = windowEnd
+        }
+        return windows
     }
 
     private suspend fun exportWorkoutEnergy(
@@ -819,6 +841,7 @@ class HealthExportEngine(
         private const val historyPermission = "android.permission.health.READ_HEALTH_DATA_HISTORY"
         private const val backgroundPermission = "android.permission.health.READ_HEALTH_DATA_IN_BACKGROUND"
         private const val ohealthPackage = "com.heytap.health.international"
+        private const val dailyAggregationChunkDays = 4_000L
         private val temporalAccessorCache = mutableMapOf<Class<*>, TemporalAccessors>()
 
         private val recordTypes = listOf(

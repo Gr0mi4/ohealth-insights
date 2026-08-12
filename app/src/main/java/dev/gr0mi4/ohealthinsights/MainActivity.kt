@@ -268,7 +268,7 @@ class MainActivity : ComponentActivity() {
         detailsText.text = if (diagnostic) "Preparing full raw diagnostic export…" else "Preparing compact sync…"
 
         lifecycleScope.launch {
-            val file = File(cacheDir, "ohealth-insights-v0.3-${System.currentTimeMillis()}.ndjson.gz")
+            val file = File(cacheDir, "ohealth-insights-v0.3.1-${System.currentTimeMillis()}.ndjson.gz")
             val preferences = getSharedPreferences(syncPreferencesName, MODE_PRIVATE)
             val previousToken = if (diagnostic) null else preferences.getString(changesTokenKey, null)
             val previousExport = if (diagnostic) {
@@ -638,7 +638,7 @@ class MainActivity : ComponentActivity() {
         val timestamp = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss")
             .withZone(ZoneOffset.UTC)
             .format(Instant.now())
-        return "ohealth-insights-v0.3-$syncMode-$timestamp.ndjson.gz"
+        return "ohealth-insights-v0.3.1-$syncMode-$timestamp.ndjson.gz"
     }
 
     private fun matchWrap(top: Int = 0) = LinearLayout.LayoutParams(
