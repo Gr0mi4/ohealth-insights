@@ -5,7 +5,7 @@ plugins {
 
 android {
     namespace = "dev.gr0mi4.ohealthinsights"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "dev.gr0mi4.ohealthinsights"
@@ -41,4 +41,3 @@ dependencies {
     implementation("androidx.health.connect:connect-client:1.1.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
 }
-
