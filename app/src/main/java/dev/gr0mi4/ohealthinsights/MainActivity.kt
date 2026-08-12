@@ -5,6 +5,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.view.Gravity
 import android.view.View
+import android.view.WindowManager
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ProgressBar
@@ -140,7 +141,7 @@ class MainActivity : ComponentActivity() {
         }
 
         detailsText = TextView(this).apply {
-            text = "This diagnostic build reads locally and exports only to a file you choose."
+            text = "This build reads locally and exports only to a file you choose. Raw heart rate is kept only during workouts."
             textSize = 15f
             setTextIsSelectable(true)
         }
@@ -152,7 +153,7 @@ class MainActivity : ComponentActivity() {
         }
 
         exportButton = Button(this).apply {
-            text = "Create diagnostic export"
+            text = "Create filtered export"
             isEnabled = false
             setOnClickListener { startExport() }
         }
@@ -218,12 +219,14 @@ class MainActivity : ComponentActivity() {
                 HealthPermission.getReadPermission(it.type) in granted
             }
             val history = historyPermission in granted
+            val background = backgroundPermission in granted
 
             detailsText.text = buildString {
                 appendLine("Readable record types: $grantedRecordTypes/${recordTypes.size}")
                 appendLine("Full-history access: ${if (history) "granted" else "not granted; export is limited to the last 30 days"}")
+                appendLine("Background read access: ${if (background) "granted" else "not granted; keep this screen open during export"}")
                 appendLine()
-                append("The export keeps source package names and raw record representations so we can identify exactly what OHealth contributes.")
+                append("All readable record types are probed first. Raw heart rate is exported only when it overlaps an exercise session.")
             }
             exportButton.isEnabled = grantedRecordTypes > 0
         }
@@ -235,7 +238,7 @@ class MainActivity : ComponentActivity() {
         detailsText.text = "Preparing export…"
 
         lifecycleScope.launch {
-            val file = File(cacheDir, "ohealth-insights-${System.currentTimeMillis()}.ndjson")
+            val file = File(cacheDir, "ohealth-insights-v0.2-${System.currentTimeMillis()}.ndjson")
             val result = runCatching {
                 buildDiagnosticExport(client, file)
             }
@@ -275,19 +278,61 @@ class MainActivity : ComponentActivity() {
                 writer.writeLine(
                     jsonObject(
                         "kind" to "manifest",
-                        "schemaVersion" to 1,
-                        "appVersion" to "0.1.0",
+                        "schemaVersion" to 2,
+                        "appVersion" to "0.2.0",
                         "exportedAt" to exportedAt.toString(),
                         "rangeStart" to start.toString(),
                         "rangeEnd" to end.toString(),
                         "fullHistoryPermission" to hasHistory,
+                        "backgroundReadPermission" to (backgroundPermission in granted),
                         "registeredRecordTypes" to recordTypes.size,
+                        "heartRatePolicy" to "workout_intervals_only",
                     ),
                 )
 
                 for ((index, spec) in recordTypes.withIndex()) {
                     withContext(Dispatchers.Main) {
-                        detailsText.text = "Scanning ${index + 1}/${recordTypes.size}: ${spec.name}"
+                        detailsText.text = "Probing ${index + 1}/${recordTypes.size}: ${spec.name}"
+                    }
+
+                    val permission = HealthPermission.getReadPermission(spec.type)
+                    if (permission !in granted) {
+                        writer.writeLine(
+                            jsonObject(
+                                "kind" to "type_probe",
+                                "recordType" to spec.name,
+                                "status" to "permission_not_granted",
+                                "sampleCount" to 0,
+                            ),
+                        )
+                        continue
+                    }
+
+                    val probe = probeRecordType(client, spec, start, end)
+                    writer.writeLine(
+                        jsonObject(
+                            "kind" to "type_probe",
+                            "recordType" to spec.name,
+                            "status" to if (probe.error == null) "complete" else "failed",
+                            "sampleCount" to probe.sampleCount,
+                            "sampleSourcePackages" to probe.sourcePackages.joinToString(","),
+                            "errorClass" to probe.error?.javaClass?.name,
+                            "message" to probe.error?.message,
+                        ),
+                    )
+                    writer.flush()
+                }
+
+                val workoutWindows = mutableListOf<TimeWindow>()
+                val exerciseSpec = recordTypes.first { it.type == ExerciseSessionRecord::class }
+                val heartRateSpec = recordTypes.first { it.type == HeartRateRecord::class }
+                val exportOrder = listOf(exerciseSpec) +
+                    recordTypes.filter { it != exerciseSpec && it != heartRateSpec } +
+                    heartRateSpec
+
+                for ((index, spec) in exportOrder.withIndex()) {
+                    withContext(Dispatchers.Main) {
+                        detailsText.text = "Exporting ${index + 1}/${exportOrder.size}: ${spec.name}"
                     }
 
                     val permission = HealthPermission.getReadPermission(spec.type)
@@ -300,31 +345,72 @@ class MainActivity : ComponentActivity() {
                                 "count" to 0,
                             ),
                         )
+                        writer.flush()
                         continue
                     }
 
-                    val count = runCatching {
-                        exportRecordType(client, spec, start, end, writer)
-                    }.getOrElse { error ->
+                    val mergedWorkoutWindows = if (spec == heartRateSpec) {
+                        mergeTimeWindows(workoutWindows)
+                    } else {
+                        emptyList()
+                    }
+
+                    if (spec == heartRateSpec && mergedWorkoutWindows.isEmpty()) {
+                        writer.writeLine(
+                            jsonObject(
+                                "kind" to "type_summary",
+                                "recordType" to spec.name,
+                                "status" to "no_workout_intervals",
+                                "count" to 0,
+                                "heartRatePolicy" to "workout_intervals_only",
+                            ),
+                        )
+                        writer.flush()
+                        continue
+                    }
+
+                    val result = when (spec) {
+                        exerciseSpec -> exportRecordType(client, spec, start, end, writer) { record ->
+                            if (record is ExerciseSessionRecord && record.endTime.isAfter(record.startTime)) {
+                                workoutWindows += TimeWindow(record.startTime, record.endTime)
+                            }
+                        }
+
+                        heartRateSpec -> exportWorkoutHeartRate(
+                            client = client,
+                            workoutWindows = mergedWorkoutWindows,
+                            writer = writer,
+                        )
+
+                        else -> exportRecordType(client, spec, start, end, writer)
+                    }
+
+                    result.error?.let { error ->
                         writer.writeLine(
                             jsonObject(
                                 "kind" to "type_error",
                                 "recordType" to spec.name,
                                 "errorClass" to error.javaClass.name,
                                 "message" to error.message,
+                                "recordsPreserved" to result.count,
                             ),
                         )
-                        0L
                     }
 
-                    if (count > 0) nonEmptyTypes += 1
-                    totalRecords += count
+                    if (result.count > 0) nonEmptyTypes += 1
+                    totalRecords += result.count
                     writer.writeLine(
                         jsonObject(
                             "kind" to "type_summary",
                             "recordType" to spec.name,
-                            "status" to "complete",
-                            "count" to count,
+                            "status" to when {
+                                result.error == null -> "complete"
+                                result.count > 0 -> "partial"
+                                else -> "failed"
+                            },
+                            "count" to result.count,
+                            "workoutIntervals" to if (spec == heartRateSpec) mergedWorkoutWindows.size else null,
+                            "heartRatePolicy" to if (spec == heartRateSpec) "workout_intervals_only" else null,
                         ),
                     )
                     writer.flush()
@@ -350,45 +436,142 @@ class MainActivity : ComponentActivity() {
         start: Instant,
         end: Instant,
         writer: BufferedWriter,
-    ): Long {
+        onRecord: (Record) -> Unit = {},
+    ): TypeExportResult {
         var count = 0L
         var pageToken: String? = null
 
-        do {
-            val response = client.readRecords(
-                ReadRecordsRequest(
-                    recordType = spec.type,
-                    timeRangeFilter = TimeRangeFilter.between(start, end),
-                    pageSize = 1_000,
-                    pageToken = pageToken,
-                ),
-            )
-
-            response.records.forEach { record ->
-                writer.writeLine(
-                    jsonObject(
-                        "kind" to "record",
-                        "recordType" to spec.name,
-                        "id" to record.metadata.id,
-                        "sourcePackage" to record.metadata.dataOrigin.packageName,
-                        "lastModifiedTime" to record.metadata.lastModifiedTime.toString(),
-                        "clientRecordId" to record.metadata.clientRecordId,
-                        "clientRecordVersion" to record.metadata.clientRecordVersion,
-                        "payload" to record.toString(),
+        return try {
+            do {
+                val response = client.readRecords(
+                    ReadRecordsRequest(
+                        recordType = spec.type,
+                        timeRangeFilter = TimeRangeFilter.between(start, end),
+                        pageSize = 1_000,
+                        pageToken = pageToken,
                     ),
                 )
-                count += 1
-            }
-            pageToken = response.pageToken
-        } while (pageToken != null)
 
-        return count
+                response.records.forEach { record ->
+                    writeRecord(writer, spec.name, record)
+                    onRecord(record)
+                    count += 1
+                }
+                writer.flush()
+                pageToken = response.pageToken
+            } while (pageToken != null)
+            TypeExportResult(count = count)
+        } catch (error: Throwable) {
+            TypeExportResult(count = count, error = error)
+        }
+    }
+
+    private suspend fun probeRecordType(
+        client: HealthConnectClient,
+        spec: RecordType,
+        start: Instant,
+        end: Instant,
+    ): TypeProbeResult = try {
+        val response = client.readRecords(
+            ReadRecordsRequest(
+                recordType = spec.type,
+                timeRangeFilter = TimeRangeFilter.between(start, end),
+                pageSize = 5,
+                ascendingOrder = false,
+            ),
+        )
+        TypeProbeResult(
+            sampleCount = response.records.size,
+            sourcePackages = response.records
+                .mapTo(sortedSetOf()) { it.metadata.dataOrigin.packageName },
+        )
+    } catch (error: Throwable) {
+        TypeProbeResult(error = error)
+    }
+
+    private suspend fun exportWorkoutHeartRate(
+        client: HealthConnectClient,
+        workoutWindows: List<TimeWindow>,
+        writer: BufferedWriter,
+    ): TypeExportResult {
+        var count = 0L
+        val exportedIds = mutableSetOf<String>()
+
+        return try {
+            workoutWindows.forEach { workoutWindow ->
+                var pageToken: String? = null
+                do {
+                    val response = client.readRecords(
+                        ReadRecordsRequest(
+                            recordType = HeartRateRecord::class,
+                            timeRangeFilter = TimeRangeFilter.between(workoutWindow.start, workoutWindow.end),
+                            pageSize = 1_000,
+                            pageToken = pageToken,
+                        ),
+                    )
+
+                    response.records.forEach { record ->
+                        val identity = record.metadata.id.ifEmpty {
+                            "${record.startTime}|${record.endTime}|${record.metadata.dataOrigin.packageName}|${record.hashCode()}"
+                        }
+                        if (exportedIds.add(identity)) {
+                            writeRecord(writer, "HeartRateRecord", record)
+                            count += 1
+                        }
+                    }
+                    writer.flush()
+                    pageToken = response.pageToken
+                } while (pageToken != null)
+            }
+            TypeExportResult(count = count)
+        } catch (error: Throwable) {
+            TypeExportResult(count = count, error = error)
+        }
+    }
+
+    private fun writeRecord(writer: BufferedWriter, recordType: String, record: Record) {
+        writer.writeLine(
+            jsonObject(
+                "kind" to "record",
+                "recordType" to recordType,
+                "id" to record.metadata.id,
+                "sourcePackage" to record.metadata.dataOrigin.packageName,
+                "lastModifiedTime" to record.metadata.lastModifiedTime.toString(),
+                "clientRecordId" to record.metadata.clientRecordId,
+                "clientRecordVersion" to record.metadata.clientRecordVersion,
+                "payload" to record.toString(),
+            ),
+        )
+    }
+
+    private fun mergeTimeWindows(windows: List<TimeWindow>): List<TimeWindow> {
+        val sorted = windows.sortedBy { it.start }
+        if (sorted.isEmpty()) return emptyList()
+
+        val merged = mutableListOf(sorted.first())
+        sorted.drop(1).forEach { workoutWindow ->
+            val previous = merged.last()
+            if (!workoutWindow.start.isAfter(previous.end)) {
+                merged[merged.lastIndex] = TimeWindow(
+                    start = previous.start,
+                    end = maxOf(previous.end, workoutWindow.end),
+                )
+            } else {
+                merged += workoutWindow
+            }
+        }
+        return merged
     }
 
     private fun setBusy(busy: Boolean) {
         permissionsButton.isEnabled = !busy && healthConnectClient != null
         exportButton.isEnabled = !busy && healthConnectClient != null
         progressBar.visibility = if (busy) View.VISIBLE else View.GONE
+        if (busy) {
+            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        } else {
+            window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
     }
 
     private fun appendDetails(message: String) {
@@ -399,7 +582,7 @@ class MainActivity : ComponentActivity() {
         val timestamp = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss")
             .withZone(ZoneOffset.UTC)
             .format(Instant.now())
-        return "ohealth-insights-$timestamp.ndjson"
+        return "ohealth-insights-v0.2-$timestamp.ndjson"
     }
 
     private fun matchWrap(top: Int = 0) = LinearLayout.LayoutParams(
@@ -426,8 +609,25 @@ class MainActivity : ComponentActivity() {
         val nonEmptyTypes: Int,
     )
 
+    private data class TypeExportResult(
+        val count: Long,
+        val error: Throwable? = null,
+    )
+
+    private data class TypeProbeResult(
+        val sampleCount: Int = 0,
+        val sourcePackages: Set<String> = emptySet(),
+        val error: Throwable? = null,
+    )
+
+    private data class TimeWindow(
+        val start: Instant,
+        val end: Instant,
+    )
+
     companion object {
         private const val historyPermission = "android.permission.health.READ_HEALTH_DATA_HISTORY"
+        private const val backgroundPermission = "android.permission.health.READ_HEALTH_DATA_IN_BACKGROUND"
         private const val healthConnectProviderPackage = "com.google.android.apps.healthdata"
 
         private val recordTypes = listOf(
@@ -476,7 +676,10 @@ class MainActivity : ComponentActivity() {
 
         private val requestedPermissions = recordTypes
             .mapTo(mutableSetOf()) { HealthPermission.getReadPermission(it.type) }
-            .apply { add(historyPermission) }
+            .apply {
+                add(historyPermission)
+                add(backgroundPermission)
+            }
     }
 }
 
