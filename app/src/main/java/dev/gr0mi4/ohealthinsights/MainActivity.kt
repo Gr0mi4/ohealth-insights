@@ -14,6 +14,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.health.connect.client.HealthConnectClient
 import androidx.health.connect.client.PermissionController
+import androidx.health.connect.client.feature.ExperimentalMindfulnessSessionApi
 import androidx.health.connect.client.permission.HealthPermission
 import androidx.health.connect.client.records.ActiveCaloriesBurnedRecord
 import androidx.health.connect.client.records.BasalBodyTemperatureRecord
@@ -72,6 +73,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+@OptIn(ExperimentalMindfulnessSessionApi::class)
 class MainActivity : ComponentActivity() {
     private lateinit var statusText: TextView
     private lateinit var detailsText: TextView
@@ -174,12 +176,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun initializeHealthConnect() {
-        when (
-            HealthConnectClient.getSdkStatus(
-                this,
-                HealthConnectClient.DEFAULT_PROVIDER_PACKAGE_NAME,
-            )
-        ) {
+        when (HealthConnectClient.getSdkStatus(this)) {
             HealthConnectClient.SDK_AVAILABLE -> {
                 healthConnectClient = HealthConnectClient.getOrCreate(this)
                 statusText.text = "Health Connect is available"
@@ -194,7 +191,7 @@ class MainActivity : ComponentActivity() {
                     startActivity(
                         Intent(
                             Intent.ACTION_VIEW,
-                            Uri.parse("market://details?id=${HealthConnectClient.DEFAULT_PROVIDER_PACKAGE_NAME}"),
+                            Uri.parse("market://details?id=$healthConnectProviderPackage"),
                         ),
                     )
                 }
@@ -431,6 +428,7 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         private const val historyPermission = "android.permission.health.READ_HEALTH_DATA_HISTORY"
+        private const val healthConnectProviderPackage = "com.google.android.apps.healthdata"
 
         private val recordTypes = listOf(
             RecordType("ActiveCaloriesBurnedRecord", ActiveCaloriesBurnedRecord::class),
@@ -519,4 +517,3 @@ private fun jsonString(value: String): String = buildString(value.length + 2) {
     }
     append('"')
 }
-
