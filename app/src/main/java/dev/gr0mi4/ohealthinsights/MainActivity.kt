@@ -3,6 +3,7 @@ package dev.gr0mi4.ohealthinsights
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.os.SystemClock
 import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
@@ -73,6 +74,8 @@ import java.time.format.DateTimeFormatter
 import java.time.temporal.ChronoUnit
 import kotlin.reflect.KClass
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -112,6 +115,8 @@ class MainActivity : ComponentActivity() {
             return@registerForActivityResult
         }
 
+        statusText.text = "Saving export file"
+        detailsText.text = "CURRENT STAGE\nSaving compressed export to the selected location…"
         lifecycleScope.launch {
             val result = runCatching {
                 withContext(Dispatchers.IO) {
@@ -119,24 +124,30 @@ class MainActivity : ComponentActivity() {
                         source.inputStream().use { input -> input.copyTo(output) }
                     }
                     source.delete()
+                    checkpoint?.let {
+                        getSharedPreferences(syncPreferencesName, MODE_PRIVATE)
+                            .edit()
+                            .putString(changesTokenKey, it.changesToken)
+                            .putString(lastSuccessfulExportKey, it.exportedAt.toString())
+                            .commit()
+                    } ?: true
                 }
             }
 
-            result.onSuccess {
-                checkpoint?.let {
-                    getSharedPreferences(syncPreferencesName, MODE_PRIVATE)
-                        .edit()
-                        .putString(changesTokenKey, it.changesToken)
-                        .putString(lastSuccessfulExportKey, it.exportedAt.toString())
-                        .apply()
-                }
-                appendDetails("Export saved successfully.")
+            result.onSuccess { checkpointSaved ->
+                detailsText.text = "Export file saved successfully."
                 statusText.text = if (checkpoint == null) {
                     "Diagnostic export complete"
-                } else {
+                } else if (checkpointSaved) {
                     "Sync checkpoint saved"
+                } else {
+                    "Export saved; checkpoint failed"
                 }
-                refreshPermissionState()
+                if (checkpoint != null && !checkpointSaved) {
+                    appendDetails("The file is safe, but the local checkpoint could not be persisted. The next sync will recover instead of assuming success.")
+                } else {
+                    refreshPermissionState()
+                }
             }.onFailure {
                 appendDetails("Could not save export: ${it.message}")
                 statusText.text = "Save failed"
@@ -248,13 +259,20 @@ class MainActivity : ComponentActivity() {
             val history = historyPermission in granted
             val background = backgroundPermission in granted
             val preferences = getSharedPreferences(syncPreferencesName, MODE_PRIVATE)
-            val hasCheckpoint = !preferences.getString(changesTokenKey, null).isNullOrBlank()
+            val hasCheckpoint = !preferences.getString(lastSuccessfulExportKey, null).isNullOrBlank()
+            val hasChangesToken = !preferences.getString(changesTokenKey, null).isNullOrBlank()
 
             detailsText.text = buildString {
                 appendLine("Readable record types: $grantedRecordTypes/${recordTypes.size}")
                 appendLine("Full-history access: ${if (history) "granted" else "not granted; export is limited to the last 30 days"}")
                 appendLine("Background read access: ${if (background) "granted" else "not granted; keep this screen open during export"}")
-                appendLine("Sync state: ${if (hasCheckpoint) "incremental; only changed days will be exported" else "first full sync required"}")
+                appendLine(
+                    "Sync state: ${when {
+                        hasChangesToken -> "incremental changes cursor"
+                        hasCheckpoint -> "timestamp recovery with 7-day overlap"
+                        else -> "first full sync required"
+                    }}",
+                )
                 appendLine()
                 append("Heart rate is kept only for workouts and sleep. Steps and calories are compacted into daily and workout summaries. Files are gzip-compressed.")
             }
@@ -267,10 +285,10 @@ class MainActivity : ComponentActivity() {
     private fun startExport(diagnostic: Boolean) {
         val client = healthConnectClient ?: return
         setBusy(true)
-        detailsText.text = if (diagnostic) "Preparing full raw diagnostic export…" else "Preparing compact sync…"
+        statusText.text = if (diagnostic) "Diagnostic export running" else "Compact sync running"
 
         lifecycleScope.launch {
-            val file = File(cacheDir, "ohealth-insights-v0.3.2-${System.currentTimeMillis()}.ndjson.gz")
+            val file = File(cacheDir, "ohealth-insights-v0.3.3-${System.currentTimeMillis()}.ndjson.gz")
             val preferences = getSharedPreferences(syncPreferencesName, MODE_PRIVATE)
             val previousToken = if (diagnostic) null else preferences.getString(changesTokenKey, null)
             val previousExport = if (diagnostic) {
@@ -279,9 +297,51 @@ class MainActivity : ComponentActivity() {
                 preferences.getString(lastSuccessfulExportKey, null)
                     ?.let { runCatching { Instant.parse(it) }.getOrNull() }
             }
+            val startedAt = SystemClock.elapsedRealtime()
+            var currentStage = if (diagnostic) {
+                "Starting full raw diagnostic export"
+            } else {
+                "Starting compact sync"
+            }
+            val recentStages = mutableListOf(currentStage)
+
+            fun elapsedText(): String {
+                val elapsedSeconds = (SystemClock.elapsedRealtime() - startedAt) / 1_000
+                return "%d:%02d".format(elapsedSeconds / 60, elapsedSeconds % 60)
+            }
+
+            fun renderProgress() {
+                detailsText.text = buildString {
+                    appendLine("CURRENT STAGE")
+                    appendLine(currentStage)
+                    appendLine()
+                    appendLine("Elapsed: ${elapsedText()}")
+                    appendLine("Any single Health Connect request is limited to 60 seconds.")
+                    if (recentStages.size > 1) {
+                        appendLine()
+                        appendLine("RECENT STAGES")
+                        recentStages.dropLast(1).takeLast(5).forEach { appendLine("✓ $it") }
+                    }
+                }
+            }
+
+            renderProgress()
+            val timer = launch {
+                while (isActive) {
+                    renderProgress()
+                    delay(1_000)
+                }
+            }
             val result = runCatching {
                 HealthExportEngine(client) { message ->
-                    withContext(Dispatchers.Main) { detailsText.text = message }
+                    withContext(Dispatchers.Main) {
+                        currentStage = message
+                        if (recentStages.lastOrNull() != message) {
+                            recentStages += message
+                            while (recentStages.size > 6) recentStages.removeAt(0)
+                        }
+                        renderProgress()
+                    }
                 }.export(
                     destination = file,
                     previousChangesToken = previousToken,
@@ -289,10 +349,11 @@ class MainActivity : ComponentActivity() {
                     diagnostic = diagnostic,
                 )
             }
+            timer.cancel()
 
             result.onSuccess { summary ->
                 pendingExport = file
-                pendingCheckpoint = if (summary.checkpointToken != null && summary.checkpointTime != null) {
+                pendingCheckpoint = if (summary.checkpointTime != null) {
                     PendingCheckpoint(summary.checkpointToken, summary.checkpointTime)
                 } else {
                     null
@@ -304,11 +365,26 @@ class MainActivity : ComponentActivity() {
                         "${summary.derivedRecordCount} compact summaries, " +
                         "${summary.nonEmptyTypes} non-empty types.",
                 )
+                if (summary.warnings.isNotEmpty()) {
+                    appendDetails("Warnings (${summary.warnings.size}):")
+                    summary.warnings.forEach { warning -> appendDetails("• $warning") }
+                }
                 saveDocumentLauncher.launch(pendingFileName!!)
             }.onFailure {
                 file.delete()
-                statusText.text = "Export failed"
-                appendDetails(it.stackTraceToString())
+                statusText.text = "Export failed at: $currentStage"
+                detailsText.text = buildString {
+                    appendLine("FAILED STAGE")
+                    appendLine(currentStage)
+                    appendLine()
+                    appendLine("Elapsed: ${elapsedText()}")
+                    appendLine("Error: ${it.javaClass.name}")
+                    appendLine(it.message ?: "No error message")
+                    appendLine()
+                    appendLine("Send a screenshot of this block.")
+                    appendLine()
+                    it.stackTrace.take(12).forEach { frame -> appendLine("at $frame") }
+                }
                 setBusy(false)
             }
         }
@@ -646,7 +722,7 @@ class MainActivity : ComponentActivity() {
         val timestamp = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss")
             .withZone(ZoneOffset.UTC)
             .format(Instant.now())
-        return "ohealth-insights-v0.3.2-$syncMode-$timestamp.ndjson.gz"
+        return "ohealth-insights-v0.3.3-$syncMode-$timestamp.ndjson.gz"
     }
 
     private fun matchWrap(top: Int = 0) = LinearLayout.LayoutParams(
@@ -674,7 +750,7 @@ class MainActivity : ComponentActivity() {
     )
 
     private data class PendingCheckpoint(
-        val changesToken: String,
+        val changesToken: String?,
         val exportedAt: Instant,
     )
 

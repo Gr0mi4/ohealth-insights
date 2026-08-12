@@ -65,8 +65,12 @@ import java.time.temporal.ChronoUnit
 import java.util.TreeSet
 import java.util.zip.GZIPOutputStream
 import kotlin.reflect.KClass
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 
 @OptIn(ExperimentalMindfulnessSessionApi::class)
 class HealthExportEngine(
@@ -79,7 +83,9 @@ class HealthExportEngine(
         previousSuccessfulExport: Instant?,
         diagnostic: Boolean,
     ): EngineExportResult = withContext(Dispatchers.IO) {
-        val granted = client.permissionController.getGrantedPermissions()
+        val granted = criticalHealthCall("Reading Health Connect permissions") {
+            client.permissionController.getGrantedPermissions()
+        }
         val exportedAt = Instant.now()
         val hasHistory = historyPermission in granted
         val knownHistoryStart = knownHistoryStartDate
@@ -123,7 +129,7 @@ class HealthExportEngine(
                 jsonObjectV3(
                     "kind" to "manifest",
                     "schemaVersion" to 3,
-                    "appVersion" to "0.3.2",
+                    "appVersion" to "0.3.3",
                     "syncMode" to plan.mode.wireName,
                     "exportedAt" to exportedAt.toString(),
                     "historyStart" to historyStart.toString(),
@@ -157,7 +163,7 @@ class HealthExportEngine(
                 )
             }
 
-            if (plan.mode == SyncMode.INITIAL_COMPACT || plan.mode == SyncMode.FULL_DIAGNOSTIC) {
+            if (plan.mode == SyncMode.FULL_DIAGNOSTIC) {
                 writeProbes(writer, granted, historyStart, end)
             }
 
@@ -188,6 +194,7 @@ class HealthExportEngine(
                 }
             }
 
+            onProgress("Finalizing compressed export")
             states.forEach { (recordType, state) ->
                 val permission = recordTypes
                     .first { it.name == recordType }
@@ -239,6 +246,14 @@ class HealthExportEngine(
             syncMode = plan.mode.wireName,
             checkpointToken = if (diagnostic) null else plan.nextChangesToken,
             checkpointTime = if (diagnostic) null else exportedAt,
+            warnings = buildList {
+                states.forEach { (recordType, state) ->
+                    state.error?.let { add("$recordType: ${it.message ?: it.javaClass.simpleName}") }
+                }
+                if (!diagnostic && plan.nextChangesToken == null) {
+                    add("Incremental cursor unavailable; the next sync will use a 7-day overlap.")
+                }
+            },
         )
     }
 
@@ -250,10 +265,13 @@ class HealthExportEngine(
         end: Instant,
     ): SyncPlan {
         if (previousChangesToken.isNullOrBlank()) {
-            val token = client.getChangesToken(ChangesTokenRequest(permittedTypes))
+            val token = requestChangesToken(permittedTypes)
+            val recoveryStart = previousSuccessfulExport?.let {
+                fallbackRecoveryStart(it, historyStart)
+            }
             return SyncPlan(
-                mode = SyncMode.INITIAL_COMPACT,
-                ranges = listOf(TimeWindow(historyStart, end)),
+                mode = if (recoveryStart == null) SyncMode.INITIAL_COMPACT else SyncMode.RECOVERY_COMPACT,
+                ranges = listOf(TimeWindow(recoveryStart ?: historyStart, end)),
                 nextChangesToken = token,
             )
         }
@@ -264,35 +282,43 @@ class HealthExportEngine(
         var tokenExpired = false
         var hasMore = false
 
-        do {
-            val response = client.getChanges(token)
-            if (response.changesTokenExpired) {
-                tokenExpired = true
-                break
-            }
-            response.changes.forEach { change ->
-                when (change) {
-                    is UpsertionChange -> addAffectedDates(change.record, affectedDates)
-                    is DeletionChange -> deletionIds += change.recordId
-                    else -> Unit
+        var changesPage = 1
+        try {
+            do {
+                val response = criticalHealthCall("Reading incremental changes: page $changesPage") {
+                    client.getChanges(token)
                 }
-            }
-            token = response.nextChangesToken
-            hasMore = response.hasMore
-        } while (hasMore)
-
-        if (tokenExpired) {
-            val replacementToken = client.getChangesToken(ChangesTokenRequest(permittedTypes))
-            val zone = ZoneId.systemDefault()
-            val recoveryStart = (previousSuccessfulExport ?: end.minus(30, ChronoUnit.DAYS))
-                .atZone(zone)
-                .toLocalDate()
-                .minusDays(1)
-                .atStartOfDay(zone)
-                .toInstant()
+                if (response.changesTokenExpired) {
+                    tokenExpired = true
+                    break
+                }
+                response.changes.forEach { change ->
+                    when (change) {
+                        is UpsertionChange -> addAffectedDates(change.record, affectedDates)
+                        is DeletionChange -> deletionIds += change.recordId
+                        else -> Unit
+                    }
+                }
+                token = response.nextChangesToken
+                hasMore = response.hasMore
+                changesPage += 1
+            } while (hasMore)
+        } catch (error: Throwable) {
+            if (error is CancellationException) throw error
+            onProgress("Warning: change cursor failed; using seven-day overlap recovery")
             return SyncPlan(
                 mode = SyncMode.RECOVERY_COMPACT,
-                ranges = listOf(TimeWindow(maxOf(historyStart, recoveryStart), end)),
+                ranges = listOf(TimeWindow(fallbackRecoveryStart(previousSuccessfulExport, historyStart), end)),
+                nextChangesToken = previousChangesToken,
+            )
+        }
+
+        if (tokenExpired) {
+            val replacementToken = requestChangesToken(permittedTypes)
+            val recoveryStart = fallbackRecoveryStart(previousSuccessfulExport, historyStart)
+            return SyncPlan(
+                mode = SyncMode.RECOVERY_COMPACT,
+                ranges = listOf(TimeWindow(recoveryStart, end)),
                 nextChangesToken = replacementToken,
                 changesTokenExpired = true,
             )
@@ -303,6 +329,40 @@ class HealthExportEngine(
             ranges = datesToRanges(affectedDates, end),
             deletionIds = deletionIds.distinct(),
             nextChangesToken = token,
+        )
+    }
+
+    private suspend fun requestChangesToken(
+        permittedTypes: Set<KClass<out Record>>,
+    ): String? {
+        onProgress("Creating incremental cursor (maximum 15 seconds)")
+        val token = try {
+            withTimeoutOrNull(changesTokenTimeoutMillis) {
+                client.getChangesToken(ChangesTokenRequest(permittedTypes))
+            }
+        } catch (error: Throwable) {
+            if (error is CancellationException) throw error
+            null
+        }
+        if (token == null) {
+            onProgress("Warning: incremental cursor unavailable; timestamp fallback enabled")
+        }
+        return token
+    }
+
+    private fun fallbackRecoveryStart(
+        previousSuccessfulExport: Instant?,
+        historyStart: Instant,
+    ): Instant {
+        val previous = previousSuccessfulExport ?: return historyStart
+        val zone = ZoneId.systemDefault()
+        return maxOf(
+            historyStart,
+            previous.atZone(zone)
+                .toLocalDate()
+                .minusDays(fallbackOverlapDays)
+                .atStartOfDay(zone)
+                .toInstant(),
         )
     }
 
@@ -363,14 +423,16 @@ class HealthExportEngine(
                 continue
             }
             val probe = runCatching {
-                client.readRecords(
-                    ReadRecordsRequest(
-                        recordType = spec.type,
-                        timeRangeFilter = TimeRangeFilter.between(start, end),
-                        pageSize = 5,
-                        ascendingOrder = false,
-                    ),
-                )
+                criticalHealthCall("Diagnostic probe ${index + 1}/${recordTypes.size}: ${spec.name}") {
+                    client.readRecords(
+                        ReadRecordsRequest(
+                            recordType = spec.type,
+                            timeRangeFilter = TimeRangeFilter.between(start, end),
+                            pageSize = 5,
+                            ascendingOrder = false,
+                        ),
+                    )
+                }
             }
             val response = probe.getOrNull()
             writer.writeJsonLine(
@@ -526,26 +588,28 @@ class HealthExportEngine(
             if (canReadCalories) add(TotalCaloriesBurnedRecord.ENERGY_TOTAL)
         }
         val totals = aggregationWindows.flatMapIndexed { index, window ->
-            onProgress("Daily totals ${index + 1}/${aggregationWindows.size}")
-            client.aggregateGroupByPeriod(
-                AggregateGroupByPeriodRequest(
-                    metrics = metrics,
-                    timeRangeFilter = TimeRangeFilter.between(window.first, window.second),
-                    timeRangeSlicer = Period.ofDays(1),
-                ),
-            )
+            criticalHealthCall("Daily totals ${index + 1}/${aggregationWindows.size}") {
+                client.aggregateGroupByPeriod(
+                    AggregateGroupByPeriodRequest(
+                        metrics = metrics,
+                        timeRangeFilter = TimeRangeFilter.between(window.first, window.second),
+                        timeRangeSlicer = Period.ofDays(1),
+                    ),
+                )
+            }
         }.associateBy { it.startTime.toLocalDate() }
         val ohealthSteps = if (canReadSteps) {
             aggregationWindows.flatMapIndexed { index, window ->
-                onProgress("Daily OHealth steps ${index + 1}/${aggregationWindows.size}")
-                client.aggregateGroupByPeriod(
-                    AggregateGroupByPeriodRequest(
-                        metrics = setOf(StepsRecord.COUNT_TOTAL),
-                        timeRangeFilter = TimeRangeFilter.between(window.first, window.second),
-                        timeRangeSlicer = Period.ofDays(1),
-                        dataOriginFilter = setOf(DataOrigin(ohealthPackage)),
-                    ),
-                )
+                criticalHealthCall("Daily OHealth steps ${index + 1}/${aggregationWindows.size}") {
+                    client.aggregateGroupByPeriod(
+                        AggregateGroupByPeriodRequest(
+                            metrics = setOf(StepsRecord.COUNT_TOTAL),
+                            timeRangeFilter = TimeRangeFilter.between(window.first, window.second),
+                            timeRangeSlicer = Period.ofDays(1),
+                            dataOriginFilter = setOf(DataOrigin(ohealthPackage)),
+                        ),
+                    )
+                }
             }.associateBy { it.startTime.toLocalDate() }
         } else {
             emptyMap()
@@ -596,16 +660,18 @@ class HealthExportEngine(
     ): Long {
         if (HealthPermission.getReadPermission(TotalCaloriesBurnedRecord::class) !in granted) return 0
         var count = 0L
-        workouts.forEach { workout ->
+        workouts.forEachIndexed { index, workout ->
             val identity = workout.id.ifEmpty { "${workout.start}|${workout.end}" }
-            if (!writtenWorkoutEnergyIds.add(identity)) return@forEach
+            if (!writtenWorkoutEnergyIds.add(identity)) return@forEachIndexed
             val result = runCatching {
-                client.aggregate(
-                    AggregateRequest(
-                        metrics = setOf(TotalCaloriesBurnedRecord.ENERGY_TOTAL),
-                        timeRangeFilter = TimeRangeFilter.between(workout.start, workout.end),
-                    ),
-                )
+                criticalHealthCall("Workout calories ${index + 1}/${workouts.size}") {
+                    client.aggregate(
+                        AggregateRequest(
+                            metrics = setOf(TotalCaloriesBurnedRecord.ENERGY_TOTAL),
+                            timeRangeFilter = TimeRangeFilter.between(workout.start, workout.end),
+                        ),
+                    )
+                }
             }
             writer.writeJsonLine(
                 jsonObjectV3(
@@ -642,16 +708,21 @@ class HealthExportEngine(
         val state = states.getValue(heartRateSpec.name)
         val detailedWorkoutIds = mutableSetOf<String>()
         var pageToken: String? = null
+        var page = 1
         try {
             do {
-                val response = client.readRecords(
-                    ReadRecordsRequest(
-                        recordType = HeartRateRecord::class,
-                        timeRangeFilter = TimeRangeFilter.between(start, end),
-                        pageSize = 1_000,
-                        pageToken = pageToken,
-                    ),
-                )
+                val response = criticalHealthCall(
+                    "HeartRateRecord: page $page (${state.count} relevant records saved)",
+                ) {
+                    client.readRecords(
+                        ReadRecordsRequest(
+                            recordType = HeartRateRecord::class,
+                            timeRangeFilter = TimeRangeFilter.between(start, end),
+                            pageSize = 1_000,
+                            pageToken = pageToken,
+                        ),
+                    )
+                }
                 response.records.forEach { record ->
                     val workout = findOverlappingSession(record.startTime, record.endTime, workouts)
                     val inSleep = overlaps(TimeWindow(record.startTime, record.endTime), sleeps)
@@ -666,9 +737,12 @@ class HealthExportEngine(
                 }
                 writer.flush()
                 pageToken = response.pageToken
+                page += 1
             } while (pageToken != null)
         } catch (error: Throwable) {
+            if (error is CancellationException) throw error
             state.error = state.error ?: error
+            onProgress("Warning: HeartRateRecord failed on page $page: ${error.message}")
         }
     }
 
@@ -687,16 +761,21 @@ class HealthExportEngine(
         if (permission !in granted || !start.isBefore(end)) return
         val state = states.getValue(spec.name)
         var pageToken: String? = null
+        var page = 1
         try {
             do {
-                val response = client.readRecords(
-                    ReadRecordsRequest(
-                        recordType = spec.type,
-                        timeRangeFilter = TimeRangeFilter.between(start, end),
-                        pageSize = 1_000,
-                        pageToken = pageToken,
-                    ),
-                )
+                val response = criticalHealthCall(
+                    "${spec.name}: page $page (${state.count} records saved)",
+                ) {
+                    client.readRecords(
+                        ReadRecordsRequest(
+                            recordType = spec.type,
+                            timeRangeFilter = TimeRangeFilter.between(start, end),
+                            pageSize = 1_000,
+                            pageToken = pageToken,
+                        ),
+                    )
+                }
                 response.records.forEach { record ->
                     if (!predicate(record)) return@forEach
                     onRecord(record)
@@ -706,9 +785,31 @@ class HealthExportEngine(
                 }
                 writer.flush()
                 pageToken = response.pageToken
+                page += 1
             } while (pageToken != null)
         } catch (error: Throwable) {
+            if (error is CancellationException) throw error
             state.error = state.error ?: error
+            onProgress("Warning: ${spec.name} failed on page $page: ${error.message}")
+        }
+    }
+
+    private suspend fun <T> criticalHealthCall(
+        stage: String,
+        block: suspend () -> T,
+    ): T {
+        onProgress(stage)
+        return try {
+            withTimeout(healthCallTimeoutMillis) { block() }
+        } catch (error: TimeoutCancellationException) {
+            throw IllegalStateException(
+                "$stage timed out after ${healthCallTimeoutMillis / 1_000} seconds",
+                error,
+            )
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            throw IllegalStateException("$stage failed: ${error.message ?: error.javaClass.simpleName}", error)
         }
     }
 
@@ -857,6 +958,9 @@ class HealthExportEngine(
         private const val backgroundPermission = "android.permission.health.READ_HEALTH_DATA_IN_BACKGROUND"
         private const val ohealthPackage = "com.heytap.health.international"
         private const val dailyAggregationChunkDays = 4_000L
+        private const val fallbackOverlapDays = 7L
+        private const val changesTokenTimeoutMillis = 15_000L
+        private const val healthCallTimeoutMillis = 60_000L
         private val knownHistoryStartDate = LocalDate.of(2025, 4, 1)
         private val temporalAccessorCache = mutableMapOf<Class<*>, TemporalAccessors>()
 
@@ -919,6 +1023,7 @@ data class EngineExportResult(
     val syncMode: String,
     val checkpointToken: String?,
     val checkpointTime: Instant?,
+    val warnings: List<String>,
 )
 
 private fun BufferedWriter.writeJsonLine(value: String) {
