@@ -25,9 +25,7 @@ import androidx.health.connect.client.records.HeartRateRecord
 import androidx.health.connect.client.records.HeartRateVariabilityRmssdRecord
 import androidx.health.connect.client.records.HeightRecord
 import androidx.health.connect.client.records.HydrationRecord
-import androidx.health.connect.client.records.InstantaneousRecord
 import androidx.health.connect.client.records.IntermenstrualBleedingRecord
-import androidx.health.connect.client.records.IntervalRecord
 import androidx.health.connect.client.records.LeanBodyMassRecord
 import androidx.health.connect.client.records.MenstruationFlowRecord
 import androidx.health.connect.client.records.MenstruationPeriodRecord
@@ -255,7 +253,7 @@ class HealthExportEngine(
 
         val affectedDates = TreeSet<LocalDate>()
         val deletionIds = mutableListOf<String>()
-        var token = previousChangesToken
+        var token: String = previousChangesToken
         var tokenExpired = false
         var hasMore = false
 
@@ -702,14 +700,24 @@ class HealthExportEngine(
         return true
     }
 
-    private fun recordBounds(record: Record): TimeWindow? = when (record) {
-        is IntervalRecord -> TimeWindow(record.startTime, record.endTime)
-        is InstantaneousRecord -> TimeWindow(record.time, record.time)
-        else -> null
+    private fun recordBounds(record: Record): TimeWindow? {
+        val accessors = temporalAccessorCache.getOrPut(record.javaClass) {
+            val methods = record.javaClass.methods
+            TemporalAccessors(
+                start = methods.firstOrNull { it.name == "getStartTime" && it.parameterCount == 0 },
+                end = methods.firstOrNull { it.name == "getEndTime" && it.parameterCount == 0 },
+                time = methods.firstOrNull { it.name == "getTime" && it.parameterCount == 0 },
+            )
+        }
+        val start = accessors.start?.invoke(record) as? Instant
+        val end = accessors.end?.invoke(record) as? Instant
+        if (start != null && end != null) return TimeWindow(start, end)
+        val time = accessors.time?.invoke(record) as? Instant ?: return null
+        return TimeWindow(time, time)
     }
 
-    private fun overlaps(record: IntervalRecord, range: TimeWindow): Boolean =
-        record.startTime < range.end && record.endTime > range.start
+    private fun overlaps(record: Record, range: TimeWindow): Boolean =
+        recordBounds(record)?.let { it.start < range.end && it.end > range.start } == true
 
     private fun overlaps(first: TimeWindow, windows: List<TimeWindow>): Boolean {
         if (windows.isEmpty()) return false
@@ -774,6 +782,12 @@ class HealthExportEngine(
         var error: Throwable? = null,
     )
 
+    private data class TemporalAccessors(
+        val start: java.lang.reflect.Method?,
+        val end: java.lang.reflect.Method?,
+        val time: java.lang.reflect.Method?,
+    )
+
     private data class TimeWindow(
         val start: Instant,
         val end: Instant,
@@ -805,6 +819,7 @@ class HealthExportEngine(
         private const val historyPermission = "android.permission.health.READ_HEALTH_DATA_HISTORY"
         private const val backgroundPermission = "android.permission.health.READ_HEALTH_DATA_IN_BACKGROUND"
         private const val ohealthPackage = "com.heytap.health.international"
+        private val temporalAccessorCache = mutableMapOf<Class<*>, TemporalAccessors>()
 
         private val recordTypes = listOf(
             RecordTypeSpec("ActiveCaloriesBurnedRecord", ActiveCaloriesBurnedRecord::class),
