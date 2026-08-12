@@ -42,7 +42,7 @@ Raw source data should remain immutable. Normalized datasets are derived views a
 5. **Sync** raw and normalized data to private user-controlled storage.
 6. **Analyze** history, trends, workload, recovery, sleep, activity, and any other available signals.
 
-## Android exporter 0.3.3
+## Android exporter 0.3.4
 
 The default export is a compact, gzip-compressed synchronization stream:
 
@@ -51,18 +51,31 @@ The default export is a compact, gzip-compressed synchronization stream:
 - The checkpoint is stored on-device only after the user successfully saves the file, preventing gaps after a cancelled or failed save.
 - If a changes token expires, the app performs a bounded recovery from the previous successful export instead of silently skipping data.
 - Heart rate is retained only when associated with an exercise or sleep session.
-- Dense workout heart-rate series are preferred; lower-frequency point records are fallback data when a dense series is unavailable.
 - Steps are represented as one deduplicated Health Connect total and one OHealth total per day.
 - Total calories are represented per day and per exercise session.
 - Sleep-associated oxygen saturation and respiratory rate remain granular.
 - A manual full raw diagnostic export remains available for discovery and completeness checks.
-- Full-history daily aggregation is split into bounded requests to stay below Health Connect's 5,000-group limit.
 - The initial history floor is 2025-04-01, matching the known beginning of this OHealth dataset and avoiding empty queries back to 1970.
 - Compact sync skips the 41-type discovery probe; probing remains available only in the full raw diagnostic export.
-- Every Health Connect phase reports its current type/page and elapsed time in the UI. Individual calls have bounded waits and identify the exact failed stage.
-- Changes-token setup cannot block the export indefinitely. If it is unavailable, the app saves a timestamp checkpoint and uses a seven-day overlap recovery on the next sync.
 
 Exports use schema version 3 and the `.ndjson.gz` format. Incremental consumers should upsert records by Health Connect record ID, replace derived daily rows by date, and apply emitted deletion identifiers.
+
+### How a long sync stays bounded
+
+Reading a multi-month history in one pass is what made earlier builds appear to hang, so every
+sync is now bounded on four axes:
+
+- Work is split into 30-day ranges. Each range is a visible progress step and produces its own `range_summary` record.
+- Heart rate, oxygen saturation, and respiratory rate are read **inside merged workout and sleep windows only**, instead of reading a continuous series across the whole range and discarding most of it.
+- Daily aggregation is chunked into 45-day requests, keeping every request well below Health Connect's 5,000-group limit.
+- Record-id deduplication uses a bounded cache, the change cursor stops after 200 pages, and each Health Connect call is capped at 60 seconds.
+
+### Debugging an export
+
+- The screen shows the current stage, elapsed time, and the most recent stages, sampled twice per second rather than pushed from every Health Connect call.
+- **Copy diagnostics log** puts the app version, device, Health Connect availability, and the full timestamped stage history on the clipboard.
+- The export file carries `range_summary`, `type_summary` (status, record count, pages read, duration), `slow_stage`, and `export_summary` records.
+- `adb logcat -s OHealthExport` streams every Health Connect call and warns on any stage slower than five seconds.
 
 ## Known source limitations
 
