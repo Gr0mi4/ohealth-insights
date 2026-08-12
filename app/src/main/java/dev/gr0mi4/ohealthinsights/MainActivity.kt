@@ -80,10 +80,13 @@ class MainActivity : ComponentActivity() {
     private lateinit var detailsText: TextView
     private lateinit var permissionsButton: Button
     private lateinit var exportButton: Button
+    private lateinit var fullExportButton: Button
     private lateinit var progressBar: ProgressBar
 
     private var healthConnectClient: HealthConnectClient? = null
     private var pendingExport: File? = null
+    private var pendingCheckpoint: PendingCheckpoint? = null
+    private var pendingFileName: String? = null
 
     private val permissionLauncher = registerForActivityResult(
         PermissionController.createRequestPermissionResultContract(),
@@ -93,10 +96,13 @@ class MainActivity : ComponentActivity() {
     }
 
     private val saveDocumentLauncher = registerForActivityResult(
-        ActivityResultContracts.CreateDocument("application/x-ndjson"),
+        ActivityResultContracts.CreateDocument("application/gzip"),
     ) { destination ->
         val source = pendingExport
+        val checkpoint = pendingCheckpoint
         pendingExport = null
+        pendingCheckpoint = null
+        pendingFileName = null
         if (destination == null || source == null) {
             appendDetails("Save cancelled. The temporary export was not shared.")
             source?.delete()
@@ -115,8 +121,20 @@ class MainActivity : ComponentActivity() {
             }
 
             result.onSuccess {
+                checkpoint?.let {
+                    getSharedPreferences(syncPreferencesName, MODE_PRIVATE)
+                        .edit()
+                        .putString(changesTokenKey, it.changesToken)
+                        .putString(lastSuccessfulExportKey, it.exportedAt.toString())
+                        .apply()
+                }
                 appendDetails("Export saved successfully.")
-                statusText.text = "Diagnostic export complete"
+                statusText.text = if (checkpoint == null) {
+                    "Diagnostic export complete"
+                } else {
+                    "Sync checkpoint saved"
+                }
+                refreshPermissionState()
             }.onFailure {
                 appendDetails("Could not save export: ${it.message}")
                 statusText.text = "Save failed"
@@ -141,7 +159,7 @@ class MainActivity : ComponentActivity() {
         }
 
         detailsText = TextView(this).apply {
-            text = "This build reads locally and exports only to a file you choose. Raw heart rate is kept only during workouts."
+            text = "Compact sync keeps workout and sleep heart rate, daily steps and calories, and all useful Health Connect record types."
             textSize = 15f
             setTextIsSelectable(true)
         }
@@ -153,9 +171,15 @@ class MainActivity : ComponentActivity() {
         }
 
         exportButton = Button(this).apply {
-            text = "Create filtered export"
+            text = "Create first full sync"
             isEnabled = false
-            setOnClickListener { startExport() }
+            setOnClickListener { startExport(diagnostic = false) }
+        }
+
+        fullExportButton = Button(this).apply {
+            text = "Full raw diagnostic export"
+            isEnabled = false
+            setOnClickListener { startExport(diagnostic = true) }
         }
 
         progressBar = ProgressBar(this).apply {
@@ -169,6 +193,7 @@ class MainActivity : ComponentActivity() {
             addView(statusText, matchWrap())
             addView(permissionsButton, matchWrap(top = 16))
             addView(exportButton, matchWrap(top = 8))
+            addView(fullExportButton, matchWrap(top = 8))
             addView(progressBar, wrapWrap(top = 12))
             addView(detailsText, matchWrap(top = 16))
         }
@@ -220,34 +245,64 @@ class MainActivity : ComponentActivity() {
             }
             val history = historyPermission in granted
             val background = backgroundPermission in granted
+            val preferences = getSharedPreferences(syncPreferencesName, MODE_PRIVATE)
+            val hasCheckpoint = !preferences.getString(changesTokenKey, null).isNullOrBlank()
 
             detailsText.text = buildString {
                 appendLine("Readable record types: $grantedRecordTypes/${recordTypes.size}")
                 appendLine("Full-history access: ${if (history) "granted" else "not granted; export is limited to the last 30 days"}")
                 appendLine("Background read access: ${if (background) "granted" else "not granted; keep this screen open during export"}")
+                appendLine("Sync state: ${if (hasCheckpoint) "incremental; only changed days will be exported" else "first full sync required"}")
                 appendLine()
-                append("All readable record types are probed first. Raw heart rate is exported only when it overlaps an exercise session.")
+                append("Heart rate is kept only for workouts and sleep. Steps and calories are compacted into daily and workout summaries. Files are gzip-compressed.")
             }
+            exportButton.text = if (hasCheckpoint) "Sync new data" else "Create first full sync"
             exportButton.isEnabled = grantedRecordTypes > 0
+            fullExportButton.isEnabled = grantedRecordTypes > 0
         }
     }
 
-    private fun startExport() {
+    private fun startExport(diagnostic: Boolean) {
         val client = healthConnectClient ?: return
         setBusy(true)
-        detailsText.text = "Preparing export…"
+        detailsText.text = if (diagnostic) "Preparing full raw diagnostic export…" else "Preparing compact sync…"
 
         lifecycleScope.launch {
-            val file = File(cacheDir, "ohealth-insights-v0.2-${System.currentTimeMillis()}.ndjson")
+            val file = File(cacheDir, "ohealth-insights-v0.3-${System.currentTimeMillis()}.ndjson.gz")
+            val preferences = getSharedPreferences(syncPreferencesName, MODE_PRIVATE)
+            val previousToken = if (diagnostic) null else preferences.getString(changesTokenKey, null)
+            val previousExport = if (diagnostic) {
+                null
+            } else {
+                preferences.getString(lastSuccessfulExportKey, null)
+                    ?.let { runCatching { Instant.parse(it) }.getOrNull() }
+            }
             val result = runCatching {
-                buildDiagnosticExport(client, file)
+                HealthExportEngine(client) { message ->
+                    withContext(Dispatchers.Main) { detailsText.text = message }
+                }.export(
+                    destination = file,
+                    previousChangesToken = previousToken,
+                    previousSuccessfulExport = previousExport,
+                    diagnostic = diagnostic,
+                )
             }
 
             result.onSuccess { summary ->
                 pendingExport = file
+                pendingCheckpoint = if (summary.checkpointToken != null && summary.checkpointTime != null) {
+                    PendingCheckpoint(summary.checkpointToken, summary.checkpointTime)
+                } else {
+                    null
+                }
+                pendingFileName = exportFileName(summary.syncMode)
                 statusText.text = "Export ready to save"
-                appendDetails("Found ${summary.recordCount} records across ${summary.nonEmptyTypes} non-empty types.")
-                saveDocumentLauncher.launch(exportFileName())
+                appendDetails(
+                    "${summary.syncMode}: ${summary.rawRecordCount} raw records, " +
+                        "${summary.derivedRecordCount} compact summaries, " +
+                        "${summary.nonEmptyTypes} non-empty types.",
+                )
+                saveDocumentLauncher.launch(pendingFileName!!)
             }.onFailure {
                 file.delete()
                 statusText.text = "Export failed"
@@ -566,6 +621,7 @@ class MainActivity : ComponentActivity() {
     private fun setBusy(busy: Boolean) {
         permissionsButton.isEnabled = !busy && healthConnectClient != null
         exportButton.isEnabled = !busy && healthConnectClient != null
+        fullExportButton.isEnabled = !busy && healthConnectClient != null
         progressBar.visibility = if (busy) View.VISIBLE else View.GONE
         if (busy) {
             window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -578,11 +634,11 @@ class MainActivity : ComponentActivity() {
         detailsText.append("\n$message")
     }
 
-    private fun exportFileName(): String {
+    private fun exportFileName(syncMode: String): String {
         val timestamp = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss")
             .withZone(ZoneOffset.UTC)
             .format(Instant.now())
-        return "ohealth-insights-v0.2-$timestamp.ndjson"
+        return "ohealth-insights-v0.3-$syncMode-$timestamp.ndjson.gz"
     }
 
     private fun matchWrap(top: Int = 0) = LinearLayout.LayoutParams(
@@ -609,6 +665,11 @@ class MainActivity : ComponentActivity() {
         val nonEmptyTypes: Int,
     )
 
+    private data class PendingCheckpoint(
+        val changesToken: String,
+        val exportedAt: Instant,
+    )
+
     private data class TypeExportResult(
         val count: Long,
         val error: Throwable? = null,
@@ -629,6 +690,9 @@ class MainActivity : ComponentActivity() {
         private const val historyPermission = "android.permission.health.READ_HEALTH_DATA_HISTORY"
         private const val backgroundPermission = "android.permission.health.READ_HEALTH_DATA_IN_BACKGROUND"
         private const val healthConnectProviderPackage = "com.google.android.apps.healthdata"
+        private const val syncPreferencesName = "ohealth_sync_state"
+        private const val changesTokenKey = "changes_token_v1"
+        private const val lastSuccessfulExportKey = "last_successful_export_v1"
 
         private val recordTypes = listOf(
             RecordType("ActiveCaloriesBurnedRecord", ActiveCaloriesBurnedRecord::class),

@@ -42,6 +42,26 @@ Raw source data should remain immutable. Normalized datasets are derived views a
 5. **Sync** raw and normalized data to private user-controlled storage.
 6. **Analyze** history, trends, workload, recovery, sleep, activity, and any other available signals.
 
-## Current status
+## Android exporter 0.3
 
-Project bootstrap. The next milestone is source discovery: obtain a representative OHealth export or backup, inspect its structure, and create the first data inventory before choosing the extractor implementation.
+The default export is a compact, gzip-compressed synchronization stream:
+
+- The first successful sync covers all readable history.
+- Later syncs use a Health Connect changes token and export only affected dates, updates, and deletion identifiers.
+- The checkpoint is stored on-device only after the user successfully saves the file, preventing gaps after a cancelled or failed save.
+- If a changes token expires, the app performs a bounded recovery from the previous successful export instead of silently skipping data.
+- Heart rate is retained only when associated with an exercise or sleep session.
+- Dense workout heart-rate series are preferred; lower-frequency point records are fallback data when a dense series is unavailable.
+- Steps are represented as one deduplicated Health Connect total and one OHealth total per day.
+- Total calories are represented per day and per exercise session.
+- Sleep-associated oxygen saturation and respiratory rate remain granular.
+- A manual full raw diagnostic export remains available for discovery and completeness checks.
+
+Exports use schema version 3 and the `.ndjson.gz` format. Incremental consumers should upsert records by Health Connect record ID, replace derived daily rows by date, and apply emitted deletion identifiers.
+
+## Known source limitations
+
+- OHealth currently writes sleep sessions without sleep-stage entries to Health Connect.
+- OHealth currently exposes exercise sessions without route data through Health Connect.
+
+These fields remain part of discovery and are not assumed to be permanently unavailable through every possible OHealth integration surface.

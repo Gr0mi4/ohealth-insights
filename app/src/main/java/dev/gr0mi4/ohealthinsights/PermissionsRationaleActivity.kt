@@ -15,7 +15,9 @@ class PermissionsRationaleActivity : Activity() {
             text = """
                 OHealth Insights reads health and fitness records only after you approve the requested Health Connect permissions.
 
-                The diagnostic build exports records to a file location that you choose. It does not upload health data and does not request internet access.
+                The app creates compressed full or incremental exports in a file location that you choose. It does not upload health data and does not request internet access.
+
+                A local sync checkpoint is advanced only after you save an export successfully.
 
                 You can revoke access at any time in Health Connect settings.
             """.trimIndent()
@@ -32,4 +34,3 @@ class PermissionsRationaleActivity : Activity() {
         )
     }
 }
-
