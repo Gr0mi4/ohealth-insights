@@ -42,7 +42,7 @@ Raw source data should remain immutable. Normalized datasets are derived views a
 5. **Sync** raw and normalized data to private user-controlled storage.
 6. **Analyze** history, trends, workload, recovery, sleep, activity, and any other available signals.
 
-## Android exporter 0.3.1
+## Android exporter 0.3.2
 
 The default export is a compact, gzip-compressed synchronization stream:
 
@@ -57,6 +57,7 @@ The default export is a compact, gzip-compressed synchronization stream:
 - Sleep-associated oxygen saturation and respiratory rate remain granular.
 - A manual full raw diagnostic export remains available for discovery and completeness checks.
 - Full-history daily aggregation is split into bounded requests to stay below Health Connect's 5,000-group limit.
+- The initial history floor is 2025-04-01, matching the known beginning of this OHealth dataset and avoiding empty queries back to 1970.
 
 Exports use schema version 3 and the `.ndjson.gz` format. Incremental consumers should upsert records by Health Connect record ID, replace derived daily rows by date, and apply emitted deletion identifiers.
 

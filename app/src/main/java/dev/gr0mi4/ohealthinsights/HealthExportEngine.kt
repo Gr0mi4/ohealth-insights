@@ -82,10 +82,16 @@ class HealthExportEngine(
         val granted = client.permissionController.getGrantedPermissions()
         val exportedAt = Instant.now()
         val hasHistory = historyPermission in granted
+        val knownHistoryStart = knownHistoryStartDate
+            .atStartOfDay(ZoneId.systemDefault())
+            .toInstant()
         val historyStart = if (hasHistory) {
-            Instant.EPOCH
+            knownHistoryStart
         } else {
-            exportedAt.minus(30, ChronoUnit.DAYS).plus(1, ChronoUnit.MINUTES)
+            maxOf(
+                knownHistoryStart,
+                exportedAt.minus(30, ChronoUnit.DAYS).plus(1, ChronoUnit.MINUTES),
+            )
         }
         val end = exportedAt.plus(1, ChronoUnit.MINUTES)
         val permittedTypes = recordTypes
@@ -117,9 +123,10 @@ class HealthExportEngine(
                 jsonObjectV3(
                     "kind" to "manifest",
                     "schemaVersion" to 3,
-                    "appVersion" to "0.3.1",
+                    "appVersion" to "0.3.2",
                     "syncMode" to plan.mode.wireName,
                     "exportedAt" to exportedAt.toString(),
+                    "historyStart" to historyStart.toString(),
                     "fullHistoryPermission" to hasHistory,
                     "backgroundReadPermission" to (backgroundPermission in granted),
                     "registeredRecordTypes" to recordTypes.size,
@@ -396,6 +403,7 @@ class HealthExportEngine(
         val expandedStart = runCatching { range.start.minus(1, ChronoUnit.DAYS) }
             .getOrDefault(range.start)
 
+        onProgress("Compact: workout and sleep sessions")
         exportRecordType(
             writer = writer,
             spec = exerciseSpec,
@@ -446,6 +454,7 @@ class HealthExportEngine(
             OxygenSaturationRecord::class,
             RespiratoryRateRecord::class,
         )
+        onProgress("Compact: health records")
         recordTypes.filter { it.type !in specialTypes }.forEach { spec ->
             exportRecordType(
                 writer = writer,
@@ -458,6 +467,7 @@ class HealthExportEngine(
             )
         }
 
+        onProgress("Compact: sleep oxygen and breathing")
         listOf(oxygenSpec, respiratorySpec).forEach { spec ->
             exportRecordType(
                 writer = writer,
@@ -471,6 +481,7 @@ class HealthExportEngine(
             )
         }
 
+        onProgress("Compact: workout and sleep heart rate")
         exportRelatedHeartRate(
             writer = writer,
             start = range.start,
@@ -482,7 +493,9 @@ class HealthExportEngine(
             sleeps = sleepWindows,
         )
 
+        onProgress("Compact: daily steps and calories")
         var derived = exportDailyActivity(writer, range, granted)
+        onProgress("Compact: workout calories")
         derived += exportWorkoutEnergy(
             writer = writer,
             workouts = workouts,
@@ -512,7 +525,8 @@ class HealthExportEngine(
             if (canReadSteps) add(StepsRecord.COUNT_TOTAL)
             if (canReadCalories) add(TotalCaloriesBurnedRecord.ENERGY_TOTAL)
         }
-        val totals = aggregationWindows.flatMap { window ->
+        val totals = aggregationWindows.flatMapIndexed { index, window ->
+            onProgress("Daily totals ${index + 1}/${aggregationWindows.size}")
             client.aggregateGroupByPeriod(
                 AggregateGroupByPeriodRequest(
                     metrics = metrics,
@@ -522,7 +536,8 @@ class HealthExportEngine(
             )
         }.associateBy { it.startTime.toLocalDate() }
         val ohealthSteps = if (canReadSteps) {
-            aggregationWindows.flatMap { window ->
+            aggregationWindows.flatMapIndexed { index, window ->
+                onProgress("Daily OHealth steps ${index + 1}/${aggregationWindows.size}")
                 client.aggregateGroupByPeriod(
                     AggregateGroupByPeriodRequest(
                         metrics = setOf(StepsRecord.COUNT_TOTAL),
@@ -842,6 +857,7 @@ class HealthExportEngine(
         private const val backgroundPermission = "android.permission.health.READ_HEALTH_DATA_IN_BACKGROUND"
         private const val ohealthPackage = "com.heytap.health.international"
         private const val dailyAggregationChunkDays = 4_000L
+        private val knownHistoryStartDate = LocalDate.of(2025, 4, 1)
         private val temporalAccessorCache = mutableMapOf<Class<*>, TemporalAccessors>()
 
         private val recordTypes = listOf(

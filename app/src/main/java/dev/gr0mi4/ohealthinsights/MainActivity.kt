@@ -66,6 +66,8 @@ import java.io.BufferedWriter
 import java.io.File
 import java.io.OutputStreamWriter
 import java.time.Instant
+import java.time.LocalDate
+import java.time.ZoneId
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import java.time.temporal.ChronoUnit
@@ -268,7 +270,7 @@ class MainActivity : ComponentActivity() {
         detailsText.text = if (diagnostic) "Preparing full raw diagnostic export…" else "Preparing compact sync…"
 
         lifecycleScope.launch {
-            val file = File(cacheDir, "ohealth-insights-v0.3.1-${System.currentTimeMillis()}.ndjson.gz")
+            val file = File(cacheDir, "ohealth-insights-v0.3.2-${System.currentTimeMillis()}.ndjson.gz")
             val preferences = getSharedPreferences(syncPreferencesName, MODE_PRIVATE)
             val previousToken = if (diagnostic) null else preferences.getString(changesTokenKey, null)
             val previousExport = if (diagnostic) {
@@ -319,10 +321,16 @@ class MainActivity : ComponentActivity() {
         val granted = client.permissionController.getGrantedPermissions()
         val exportedAt = Instant.now()
         val hasHistory = historyPermission in granted
+        val knownHistoryStart = LocalDate.of(2025, 4, 1)
+            .atStartOfDay(ZoneId.systemDefault())
+            .toInstant()
         val start = if (hasHistory) {
-            Instant.EPOCH
+            knownHistoryStart
         } else {
-            exportedAt.minus(30, ChronoUnit.DAYS).plus(1, ChronoUnit.MINUTES)
+            maxOf(
+                knownHistoryStart,
+                exportedAt.minus(30, ChronoUnit.DAYS).plus(1, ChronoUnit.MINUTES),
+            )
         }
         val end = exportedAt.plus(1, ChronoUnit.MINUTES)
         var totalRecords = 0L
@@ -638,7 +646,7 @@ class MainActivity : ComponentActivity() {
         val timestamp = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss")
             .withZone(ZoneOffset.UTC)
             .format(Instant.now())
-        return "ohealth-insights-v0.3.1-$syncMode-$timestamp.ndjson.gz"
+        return "ohealth-insights-v0.3.2-$syncMode-$timestamp.ndjson.gz"
     }
 
     private fun matchWrap(top: Int = 0) = LinearLayout.LayoutParams(
