@@ -1,5 +1,6 @@
 package dev.gr0mi4.ohealthinsights
 
+import android.util.Log
 import androidx.health.connect.client.HealthConnectClient
 import androidx.health.connect.client.aggregate.AggregateMetric
 import androidx.health.connect.client.changes.DeletionChange
@@ -72,11 +73,19 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 
+/**
+ * Reads Health Connect data into a gzipped NDJSON file.
+ *
+ * [onProgress] is invoked from the export thread and must not block: the caller is expected to
+ * store the latest message and render it on its own schedule.
+ */
 @OptIn(ExperimentalMindfulnessSessionApi::class)
 class HealthExportEngine(
     private val client: HealthConnectClient,
-    private val onProgress: suspend (String) -> Unit,
+    private val onProgress: (String) -> Unit,
 ) {
+    private val slowStages = mutableListOf<StageTiming>()
+
     suspend fun export(
         destination: File,
         previousChangesToken: String?,
@@ -86,11 +95,10 @@ class HealthExportEngine(
         val granted = criticalHealthCall("Reading Health Connect permissions") {
             client.permissionController.getGrantedPermissions()
         }
+        val zone = ZoneId.systemDefault()
         val exportedAt = Instant.now()
         val hasHistory = historyPermission in granted
-        val knownHistoryStart = knownHistoryStartDate
-            .atStartOfDay(ZoneId.systemDefault())
-            .toInstant()
+        val knownHistoryStart = knownHistoryStartDate.atStartOfDay(zone).toInstant()
         val historyStart = if (hasHistory) {
             knownHistoryStart
         } else {
@@ -107,7 +115,7 @@ class HealthExportEngine(
         val plan = if (diagnostic) {
             SyncPlan(
                 mode = SyncMode.FULL_DIAGNOSTIC,
-                ranges = listOf(TimeWindow(historyStart, end)),
+                ranges = chunkRange(TimeWindow(historyStart, end)),
             )
         } else {
             prepareSyncPlan(
@@ -119,24 +127,28 @@ class HealthExportEngine(
             )
         }
 
-        val states = recordTypes.associate { it.name to TypeState() }.toMutableMap()
-        val writtenRecordIds = mutableSetOf<String>()
+        val states = recordTypes.associate { it.name to TypeState() }
+        val writtenRecordIds = BoundedIdSet(maxTrackedRecordIds)
         val writtenWorkoutEnergyIds = mutableSetOf<String>()
+        val writtenDailyDates = mutableSetOf<LocalDate>()
         var derivedCount = 0L
 
         GZIPOutputStream(destination.outputStream()).bufferedWriter(Charsets.UTF_8).use { writer ->
             writer.writeJsonLine(
-                jsonObjectV3(
+                jsonObject(
                     "kind" to "manifest",
                     "schemaVersion" to 3,
-                    "appVersion" to "0.3.3",
+                    "appVersion" to BuildConfig.VERSION_NAME,
                     "syncMode" to plan.mode.wireName,
                     "exportedAt" to exportedAt.toString(),
                     "historyStart" to historyStart.toString(),
+                    "timeZone" to zone.id,
                     "fullHistoryPermission" to hasHistory,
                     "backgroundReadPermission" to (backgroundPermission in granted),
                     "registeredRecordTypes" to recordTypes.size,
-                    "heartRatePolicy" to "workout_or_sleep",
+                    "permittedRecordTypes" to permittedTypes.size,
+                    "rangeCount" to plan.ranges.size,
+                    "heartRatePolicy" to "workout_or_sleep_windows",
                     "stepsPolicy" to "daily_deduplicated_and_ohealth",
                     "caloriesPolicy" to "daily_and_per_workout",
                     "compression" to "gzip",
@@ -146,7 +158,7 @@ class HealthExportEngine(
 
             plan.ranges.forEach { range ->
                 writer.writeJsonLine(
-                    jsonObjectV3(
+                    jsonObject(
                         "kind" to "sync_scope",
                         "rangeStart" to range.start.toString(),
                         "rangeEnd" to range.end.toString(),
@@ -156,7 +168,7 @@ class HealthExportEngine(
             }
             plan.deletionIds.forEach { recordId ->
                 writer.writeJsonLine(
-                    jsonObjectV3(
+                    jsonObject(
                         "kind" to "deletion",
                         "id" to recordId,
                     ),
@@ -167,47 +179,58 @@ class HealthExportEngine(
                 writeProbes(writer, granted, historyStart, end)
             }
 
-            if (plan.mode == SyncMode.FULL_DIAGNOSTIC) {
-                for ((index, spec) in recordTypes.withIndex()) {
-                    onProgress("Raw ${index + 1}/${recordTypes.size}: ${spec.name}")
-                    exportRecordType(
+            for ((index, range) in plan.ranges.withIndex()) {
+                val label = "Range ${index + 1}/${plan.ranges.size} (${rangeLabel(range, zone)})"
+                val rangeStartedAt = System.nanoTime()
+                val rawBefore = states.values.sumOf { it.count }
+                val derivedBefore = derivedCount
+
+                if (plan.mode == SyncMode.FULL_DIAGNOSTIC) {
+                    exportRawRange(
                         writer = writer,
-                        spec = spec,
-                        start = historyStart,
-                        end = end,
+                        range = range,
+                        label = label,
                         granted = granted,
                         states = states,
                         writtenRecordIds = writtenRecordIds,
                     )
-                }
-            } else {
-                for ((index, range) in plan.ranges.withIndex()) {
-                    onProgress("Compact range ${index + 1}/${plan.ranges.size}")
+                } else {
                     derivedCount += exportCompactRange(
                         writer = writer,
                         range = range,
+                        label = label,
                         granted = granted,
                         states = states,
                         writtenRecordIds = writtenRecordIds,
                         writtenWorkoutEnergyIds = writtenWorkoutEnergyIds,
+                        writtenDailyDates = writtenDailyDates,
                     )
                 }
+
+                writer.writeJsonLine(
+                    jsonObject(
+                        "kind" to "range_summary",
+                        "rangeStart" to range.start.toString(),
+                        "rangeEnd" to range.end.toString(),
+                        "rawRecordsWritten" to (states.values.sumOf { it.count } - rawBefore),
+                        "derivedRecordsWritten" to (derivedCount - derivedBefore),
+                        "durationMillis" to elapsedMillis(rangeStartedAt),
+                    ),
+                )
+                writer.flush()
             }
 
             onProgress("Finalizing compressed export")
             states.forEach { (recordType, state) ->
-                val permission = recordTypes
-                    .first { it.name == recordType }
-                    .let { HealthPermission.getReadPermission(it.type) }
                 val status = when {
-                    permission !in granted -> "permission_not_granted"
+                    permissionByTypeName.getValue(recordType) !in granted -> "permission_not_granted"
                     state.error == null -> "complete"
                     state.count > 0 -> "partial"
                     else -> "failed"
                 }
                 state.error?.let { error ->
                     writer.writeJsonLine(
-                        jsonObjectV3(
+                        jsonObject(
                             "kind" to "type_error",
                             "recordType" to recordType,
                             "errorClass" to error.javaClass.name,
@@ -217,23 +240,36 @@ class HealthExportEngine(
                     )
                 }
                 writer.writeJsonLine(
-                    jsonObjectV3(
+                    jsonObject(
                         "kind" to "type_summary",
                         "recordType" to recordType,
                         "status" to status,
                         "count" to state.count,
+                        "pagesRead" to state.pages,
+                        "durationMillis" to state.durationMillis,
                     ),
                 )
             }
 
-            val rawCount = states.values.sumOf { it.count }
+            slowStages.sortedByDescending { it.durationMillis }.forEach { timing ->
+                writer.writeJsonLine(
+                    jsonObject(
+                        "kind" to "slow_stage",
+                        "stage" to timing.stage,
+                        "durationMillis" to timing.durationMillis,
+                    ),
+                )
+            }
+
             writer.writeJsonLine(
-                jsonObjectV3(
+                jsonObject(
                     "kind" to "export_summary",
-                    "rawRecordCount" to rawCount,
+                    "rawRecordCount" to states.values.sumOf { it.count },
                     "derivedRecordCount" to derivedCount,
                     "deletionCount" to plan.deletionIds.size,
                     "nonEmptyTypes" to states.values.count { it.count > 0 },
+                    "healthCallCount" to states.values.sumOf { it.pages.toLong() },
+                    "slowStageCount" to slowStages.size,
                     "completedAt" to Instant.now().toString(),
                 ),
             )
@@ -244,6 +280,7 @@ class HealthExportEngine(
             derivedRecordCount = derivedCount,
             nonEmptyTypes = states.values.count { it.count > 0 },
             syncMode = plan.mode.wireName,
+            rangeCount = plan.ranges.size,
             checkpointToken = if (diagnostic) null else plan.nextChangesToken,
             checkpointTime = if (diagnostic) null else exportedAt,
             warnings = buildList {
@@ -251,7 +288,10 @@ class HealthExportEngine(
                     state.error?.let { add("$recordType: ${it.message ?: it.javaClass.simpleName}") }
                 }
                 if (!diagnostic && plan.nextChangesToken == null) {
-                    add("Incremental cursor unavailable; the next sync will use a 7-day overlap.")
+                    add("Incremental cursor unavailable; the next sync will use a $fallbackOverlapDays-day overlap.")
+                }
+                slowStages.maxByOrNull { it.durationMillis }?.let { timing ->
+                    add("Slowest stage: ${timing.stage} (${timing.durationMillis / 1_000}s)")
                 }
             },
         )
@@ -271,7 +311,7 @@ class HealthExportEngine(
             }
             return SyncPlan(
                 mode = if (recoveryStart == null) SyncMode.INITIAL_COMPACT else SyncMode.RECOVERY_COMPACT,
-                ranges = listOf(TimeWindow(recoveryStart ?: historyStart, end)),
+                ranges = chunkRange(TimeWindow(recoveryStart ?: historyStart, end)),
                 nextChangesToken = token,
             )
         }
@@ -281,8 +321,8 @@ class HealthExportEngine(
         var token: String = previousChangesToken
         var tokenExpired = false
         var hasMore = false
-
         var changesPage = 1
+
         try {
             do {
                 val response = criticalHealthCall("Reading incremental changes: page $changesPage") {
@@ -302,46 +342,71 @@ class HealthExportEngine(
                 token = response.nextChangesToken
                 hasMore = response.hasMore
                 changesPage += 1
+                if (hasMore && changesPage > maxChangesPages) {
+                    onProgress("Warning: change cursor exceeded $maxChangesPages pages; using overlap recovery")
+                    return recoveryPlan(
+                        permittedTypes = permittedTypes,
+                        previousSuccessfulExport = previousSuccessfulExport,
+                        historyStart = historyStart,
+                        end = end,
+                    )
+                }
             } while (hasMore)
+        } catch (error: CancellationException) {
+            throw error
         } catch (error: Throwable) {
-            if (error is CancellationException) throw error
-            onProgress("Warning: change cursor failed; using seven-day overlap recovery")
+            onProgress("Warning: change cursor failed (${error.message}); using overlap recovery")
             return SyncPlan(
                 mode = SyncMode.RECOVERY_COMPACT,
-                ranges = listOf(TimeWindow(fallbackRecoveryStart(previousSuccessfulExport, historyStart), end)),
+                ranges = chunkRange(
+                    TimeWindow(fallbackRecoveryStart(previousSuccessfulExport, historyStart), end),
+                ),
                 nextChangesToken = previousChangesToken,
             )
         }
 
         if (tokenExpired) {
-            val replacementToken = requestChangesToken(permittedTypes)
-            val recoveryStart = fallbackRecoveryStart(previousSuccessfulExport, historyStart)
-            return SyncPlan(
-                mode = SyncMode.RECOVERY_COMPACT,
-                ranges = listOf(TimeWindow(recoveryStart, end)),
-                nextChangesToken = replacementToken,
-                changesTokenExpired = true,
-            )
+            return recoveryPlan(
+                permittedTypes = permittedTypes,
+                previousSuccessfulExport = previousSuccessfulExport,
+                historyStart = historyStart,
+                end = end,
+            ).copy(changesTokenExpired = true)
         }
 
         return SyncPlan(
             mode = SyncMode.INCREMENTAL_COMPACT,
-            ranges = datesToRanges(affectedDates, end),
+            ranges = datesToRanges(affectedDates, end).flatMap { chunkRange(it) },
             deletionIds = deletionIds.distinct(),
             nextChangesToken = token,
         )
     }
 
+    private suspend fun recoveryPlan(
+        permittedTypes: Set<KClass<out Record>>,
+        previousSuccessfulExport: Instant?,
+        historyStart: Instant,
+        end: Instant,
+    ): SyncPlan = SyncPlan(
+        mode = SyncMode.RECOVERY_COMPACT,
+        ranges = chunkRange(
+            TimeWindow(fallbackRecoveryStart(previousSuccessfulExport, historyStart), end),
+        ),
+        nextChangesToken = requestChangesToken(permittedTypes),
+    )
+
     private suspend fun requestChangesToken(
         permittedTypes: Set<KClass<out Record>>,
     ): String? {
-        onProgress("Creating incremental cursor (maximum 15 seconds)")
+        onProgress("Creating incremental cursor (maximum ${changesTokenTimeoutMillis / 1_000} seconds)")
         val token = try {
             withTimeoutOrNull(changesTokenTimeoutMillis) {
                 client.getChangesToken(ChangesTokenRequest(permittedTypes))
             }
+        } catch (error: CancellationException) {
+            throw error
         } catch (error: Throwable) {
-            if (error is CancellationException) throw error
+            Log.w(logTag, "Changes token request failed", error)
             null
         }
         if (token == null) {
@@ -376,9 +441,12 @@ class HealthExportEngine(
             bounds.end
         }
         val endDate = inclusiveEnd.atZone(zone).toLocalDate()
-        while (!date.isAfter(endDate)) {
+        // A record with a corrupt far-future end time would otherwise walk millions of days.
+        var remaining = maxAffectedDaysPerRecord
+        while (!date.isAfter(endDate) && remaining > 0) {
             target += date
             date = date.plusDays(1)
+            remaining -= 1
         }
     }
 
@@ -402,6 +470,22 @@ class HealthExportEngine(
         }.filter { it.start.isBefore(it.end) }
     }
 
+    /**
+     * Splits a range into bounded slices so that a multi-month sync reports progress, keeps every
+     * Health Connect request small, and never holds a whole history in memory at once.
+     */
+    private fun chunkRange(range: TimeWindow): List<TimeWindow> {
+        if (!range.start.isBefore(range.end)) return emptyList()
+        val chunks = mutableListOf<TimeWindow>()
+        var start = range.start
+        while (start.isBefore(range.end)) {
+            val next = minOf(start.plus(rangeChunkDays, ChronoUnit.DAYS), range.end)
+            chunks += TimeWindow(start, next)
+            start = next
+        }
+        return chunks
+    }
+
     private suspend fun writeProbes(
         writer: BufferedWriter,
         granted: Set<String>,
@@ -409,11 +493,10 @@ class HealthExportEngine(
         end: Instant,
     ) {
         for ((index, spec) in recordTypes.withIndex()) {
-            onProgress("Probe ${index + 1}/${recordTypes.size}: ${spec.name}")
             val permission = HealthPermission.getReadPermission(spec.type)
             if (permission !in granted) {
                 writer.writeJsonLine(
-                    jsonObjectV3(
+                    jsonObject(
                         "kind" to "type_probe",
                         "recordType" to spec.name,
                         "status" to "permission_not_granted",
@@ -423,7 +506,7 @@ class HealthExportEngine(
                 continue
             }
             val probe = runCatching {
-                criticalHealthCall("Diagnostic probe ${index + 1}/${recordTypes.size}: ${spec.name}") {
+                criticalHealthCall("Probe ${index + 1}/${recordTypes.size}: ${spec.name}") {
                     client.readRecords(
                         ReadRecordsRequest(
                             recordType = spec.type,
@@ -434,9 +517,10 @@ class HealthExportEngine(
                     )
                 }
             }
+            probe.exceptionOrNull()?.let { if (it is CancellationException) throw it }
             val response = probe.getOrNull()
             writer.writeJsonLine(
-                jsonObjectV3(
+                jsonObject(
                     "kind" to "type_probe",
                     "recordType" to spec.name,
                     "status" to if (probe.isSuccess) "complete" else "failed",
@@ -452,31 +536,55 @@ class HealthExportEngine(
         }
     }
 
+    private suspend fun exportRawRange(
+        writer: BufferedWriter,
+        range: TimeWindow,
+        label: String,
+        granted: Set<String>,
+        states: Map<String, TypeState>,
+        writtenRecordIds: BoundedIdSet,
+    ) {
+        for ((index, spec) in recordTypes.withIndex()) {
+            exportRecordType(
+                writer = writer,
+                spec = spec,
+                start = range.start,
+                end = range.end,
+                label = "$label raw ${index + 1}/${recordTypes.size}",
+                granted = granted,
+                states = states,
+                writtenRecordIds = writtenRecordIds,
+            )
+        }
+    }
+
     private suspend fun exportCompactRange(
         writer: BufferedWriter,
         range: TimeWindow,
+        label: String,
         granted: Set<String>,
-        states: MutableMap<String, TypeState>,
-        writtenRecordIds: MutableSet<String>,
+        states: Map<String, TypeState>,
+        writtenRecordIds: BoundedIdSet,
         writtenWorkoutEnergyIds: MutableSet<String>,
+        writtenDailyDates: MutableSet<LocalDate>,
     ): Long {
         val workouts = mutableListOf<SessionWindow>()
-        val sleeps = mutableListOf<SessionWindow>()
-        val expandedStart = runCatching { range.start.minus(1, ChronoUnit.DAYS) }
-            .getOrDefault(range.start)
+        val sleeps = mutableListOf<TimeWindow>()
+        // Sessions that started before the range still belong to it, so look one day further back.
+        val expandedStart = range.start.minus(1, ChronoUnit.DAYS)
 
-        onProgress("Compact: workout and sleep sessions")
         exportRecordType(
             writer = writer,
             spec = exerciseSpec,
             start = expandedStart,
             end = range.end,
+            label = "$label workouts",
             granted = granted,
             states = states,
             writtenRecordIds = writtenRecordIds,
             predicate = { record -> record is ExerciseSessionRecord && overlaps(record, range) },
             onRecord = { record ->
-                if (record is ExerciseSessionRecord && overlaps(record, range)) {
+                if (record is ExerciseSessionRecord) {
                     workouts += SessionWindow(
                         id = record.metadata.id,
                         start = record.startTime,
@@ -491,76 +599,71 @@ class HealthExportEngine(
             spec = sleepSpec,
             start = expandedStart,
             end = range.end,
+            label = "$label sleep",
             granted = granted,
             states = states,
             writtenRecordIds = writtenRecordIds,
             predicate = { record -> record is SleepSessionRecord && overlaps(record, range) },
             onRecord = { record ->
-                if (record is SleepSessionRecord && overlaps(record, range)) {
-                    sleeps += SessionWindow(
-                        id = record.metadata.id,
-                        start = record.startTime,
-                        end = record.endTime,
-                    )
+                if (record is SleepSessionRecord) {
+                    sleeps += TimeWindow(record.startTime, record.endTime)
                 }
             },
         )
 
-        val sleepWindows = mergeWindows(sleeps.map { TimeWindow(it.start, it.end) })
-        val specialTypes = setOf(
-            ExerciseSessionRecord::class,
-            SleepSessionRecord::class,
-            HeartRateRecord::class,
-            StepsRecord::class,
-            TotalCaloriesBurnedRecord::class,
-            OxygenSaturationRecord::class,
-            RespiratoryRateRecord::class,
+        val sleepWindows = mergeWindows(sleeps.mapNotNull { clampTo(it, range) })
+        val sessionWindows = mergeWindows(
+            (sleeps + workouts.map { TimeWindow(it.start, it.end) }).mapNotNull { clampTo(it, range) },
         )
-        onProgress("Compact: health records")
-        recordTypes.filter { it.type !in specialTypes }.forEach { spec ->
+
+        recordTypes.filter { it.type !in windowedTypes }.forEach { spec ->
             exportRecordType(
                 writer = writer,
                 spec = spec,
                 start = range.start,
                 end = range.end,
+                label = "$label records",
                 granted = granted,
                 states = states,
                 writtenRecordIds = writtenRecordIds,
             )
         }
 
-        onProgress("Compact: sleep oxygen and breathing")
-        listOf(oxygenSpec, respiratorySpec).forEach { spec ->
-            exportRecordType(
-                writer = writer,
-                spec = spec,
-                start = range.start,
-                end = range.end,
-                granted = granted,
-                states = states,
-                writtenRecordIds = writtenRecordIds,
-                predicate = { record -> recordBounds(record)?.let { overlaps(it, sleepWindows) } == true },
-            )
-        }
-
-        onProgress("Compact: workout and sleep heart rate")
-        exportRelatedHeartRate(
+        // Reading these inside session windows only is what keeps a full-history sync finite:
+        // continuous heart rate over months is far too large to read and filter afterwards.
+        exportRecordTypeInWindows(
             writer = writer,
-            start = range.start,
-            end = range.end,
+            spec = heartRateSpec,
+            windows = sessionWindows,
+            label = "$label heart rate",
             granted = granted,
             states = states,
             writtenRecordIds = writtenRecordIds,
-            workouts = workouts.sortedBy { it.start },
-            sleeps = sleepWindows,
+        )
+        exportRecordTypeInWindows(
+            writer = writer,
+            spec = oxygenSpec,
+            windows = sleepWindows,
+            label = "$label sleep oxygen",
+            granted = granted,
+            states = states,
+            writtenRecordIds = writtenRecordIds,
+        )
+        exportRecordTypeInWindows(
+            writer = writer,
+            spec = respiratorySpec,
+            windows = sleepWindows,
+            label = "$label sleep breathing",
+            granted = granted,
+            states = states,
+            writtenRecordIds = writtenRecordIds,
         )
 
-        onProgress("Compact: daily steps and calories")
-        var derived = exportDailyActivity(writer, range, granted)
-        onProgress("Compact: workout calories")
+        var derived = exportDailyActivity(writer, range, label, granted, writtenDailyDates)
         derived += exportWorkoutEnergy(
             writer = writer,
             workouts = workouts,
+            label = label,
             granted = granted,
             writtenWorkoutEnergyIds = writtenWorkoutEnergyIds,
         )
@@ -570,7 +673,9 @@ class HealthExportEngine(
     private suspend fun exportDailyActivity(
         writer: BufferedWriter,
         range: TimeWindow,
+        label: String,
         granted: Set<String>,
+        writtenDailyDates: MutableSet<LocalDate>,
     ): Long {
         val canReadSteps = HealthPermission.getReadPermission(StepsRecord::class) in granted
         val canReadCalories = HealthPermission.getReadPermission(TotalCaloriesBurnedRecord::class) in granted
@@ -582,29 +687,29 @@ class HealthExportEngine(
             .toLocalDate()
             .plusDays(1)
             .atStartOfDay()
-        val aggregationWindows = dailyAggregationWindows(localStart, localEnd)
+        val windows = dailyAggregationWindows(localStart, localEnd)
         val metrics = mutableSetOf<AggregateMetric<*>>().apply {
             if (canReadSteps) add(StepsRecord.COUNT_TOTAL)
             if (canReadCalories) add(TotalCaloriesBurnedRecord.ENERGY_TOTAL)
         }
-        val totals = aggregationWindows.flatMapIndexed { index, window ->
-            criticalHealthCall("Daily totals ${index + 1}/${aggregationWindows.size}") {
+        val totals = windows.flatMapIndexed { index, window ->
+            criticalHealthCall("$label daily totals ${index + 1}/${windows.size}") {
                 client.aggregateGroupByPeriod(
                     AggregateGroupByPeriodRequest(
                         metrics = metrics,
-                        timeRangeFilter = TimeRangeFilter.between(window.first, window.second),
+                        timeRangeFilter = TimeRangeFilter.between(window.start, window.end),
                         timeRangeSlicer = Period.ofDays(1),
                     ),
                 )
             }
         }.associateBy { it.startTime.toLocalDate() }
         val ohealthSteps = if (canReadSteps) {
-            aggregationWindows.flatMapIndexed { index, window ->
-                criticalHealthCall("Daily OHealth steps ${index + 1}/${aggregationWindows.size}") {
+            windows.flatMapIndexed { index, window ->
+                criticalHealthCall("$label OHealth steps ${index + 1}/${windows.size}") {
                     client.aggregateGroupByPeriod(
                         AggregateGroupByPeriodRequest(
                             metrics = setOf(StepsRecord.COUNT_TOTAL),
-                            timeRangeFilter = TimeRangeFilter.between(window.first, window.second),
+                            timeRangeFilter = TimeRangeFilter.between(window.start, window.end),
                             timeRangeSlicer = Period.ofDays(1),
                             dataOriginFilter = setOf(DataOrigin(ohealthPackage)),
                         ),
@@ -615,11 +720,12 @@ class HealthExportEngine(
             emptyMap()
         }
 
-        val dates = (totals.keys + ohealthSteps.keys).toSortedSet()
-        dates.forEach { date ->
+        var written = 0L
+        (totals.keys + ohealthSteps.keys).toSortedSet().forEach { date ->
+            if (!writtenDailyDates.add(date)) return@forEach
             val total = totals[date]?.result
             writer.writeJsonLine(
-                jsonObjectV3(
+                jsonObject(
                     "kind" to "daily_activity",
                     "date" to date.toString(),
                     "stepsTotalDeduplicated" to total?.get(StepsRecord.COUNT_TOTAL),
@@ -633,20 +739,21 @@ class HealthExportEngine(
                         ?.joinToString(","),
                 ),
             )
+            written += 1
         }
         writer.flush()
-        return dates.size.toLong()
+        return written
     }
 
     private fun dailyAggregationWindows(
         start: LocalDateTime,
         end: LocalDateTime,
-    ): List<Pair<LocalDateTime, LocalDateTime>> {
-        val windows = mutableListOf<Pair<LocalDateTime, LocalDateTime>>()
+    ): List<LocalWindow> {
+        val windows = mutableListOf<LocalWindow>()
         var windowStart = start
         while (windowStart < end) {
             val windowEnd = minOf(windowStart.plusDays(dailyAggregationChunkDays), end)
-            windows += windowStart to windowEnd
+            windows += LocalWindow(windowStart, windowEnd)
             windowStart = windowEnd
         }
         return windows
@@ -655,6 +762,7 @@ class HealthExportEngine(
     private suspend fun exportWorkoutEnergy(
         writer: BufferedWriter,
         workouts: List<SessionWindow>,
+        label: String,
         granted: Set<String>,
         writtenWorkoutEnergyIds: MutableSet<String>,
     ): Long {
@@ -664,7 +772,7 @@ class HealthExportEngine(
             val identity = workout.id.ifEmpty { "${workout.start}|${workout.end}" }
             if (!writtenWorkoutEnergyIds.add(identity)) return@forEachIndexed
             val result = runCatching {
-                criticalHealthCall("Workout calories ${index + 1}/${workouts.size}") {
+                criticalHealthCall("$label workout calories ${index + 1}/${workouts.size}") {
                     client.aggregate(
                         AggregateRequest(
                             metrics = setOf(TotalCaloriesBurnedRecord.ENERGY_TOTAL),
@@ -673,8 +781,9 @@ class HealthExportEngine(
                     )
                 }
             }
+            result.exceptionOrNull()?.let { if (it is CancellationException) throw it }
             writer.writeJsonLine(
-                jsonObjectV3(
+                jsonObject(
                     "kind" to "workout_energy",
                     "exerciseSessionId" to workout.id,
                     "startTime" to workout.start.toString(),
@@ -693,56 +802,30 @@ class HealthExportEngine(
         return count
     }
 
-    private suspend fun exportRelatedHeartRate(
+    private suspend fun exportRecordTypeInWindows(
         writer: BufferedWriter,
-        start: Instant,
-        end: Instant,
+        spec: RecordTypeSpec,
+        windows: List<TimeWindow>,
+        label: String,
         granted: Set<String>,
-        states: MutableMap<String, TypeState>,
-        writtenRecordIds: MutableSet<String>,
-        workouts: List<SessionWindow>,
-        sleeps: List<TimeWindow>,
+        states: Map<String, TypeState>,
+        writtenRecordIds: BoundedIdSet,
     ) {
-        val permission = HealthPermission.getReadPermission(HeartRateRecord::class)
-        if (permission !in granted) return
-        val state = states.getValue(heartRateSpec.name)
-        val detailedWorkoutIds = mutableSetOf<String>()
-        var pageToken: String? = null
-        var page = 1
-        try {
-            do {
-                val response = criticalHealthCall(
-                    "HeartRateRecord: page $page (${state.count} relevant records saved)",
-                ) {
-                    client.readRecords(
-                        ReadRecordsRequest(
-                            recordType = HeartRateRecord::class,
-                            timeRangeFilter = TimeRangeFilter.between(start, end),
-                            pageSize = 1_000,
-                            pageToken = pageToken,
-                        ),
-                    )
-                }
-                response.records.forEach { record ->
-                    val workout = findOverlappingSession(record.startTime, record.endTime, workouts)
-                    val inSleep = overlaps(TimeWindow(record.startTime, record.endTime), sleeps)
-                    if (workout == null && !inSleep) return@forEach
-
-                    val detailed = record.endTime.isAfter(record.startTime)
-                    if (detailed && workout != null) detailedWorkoutIds += workout.id
-                    val keep = inSleep || workout == null || detailed || workout.id !in detailedWorkoutIds
-                    if (keep && writeRecord(writer, heartRateSpec.name, record, writtenRecordIds)) {
-                        state.count += 1
-                    }
-                }
-                writer.flush()
-                pageToken = response.pageToken
-                page += 1
-            } while (pageToken != null)
-        } catch (error: Throwable) {
-            if (error is CancellationException) throw error
-            state.error = state.error ?: error
-            onProgress("Warning: HeartRateRecord failed on page $page: ${error.message}")
+        if (HealthPermission.getReadPermission(spec.type) !in granted) return
+        windows.forEachIndexed { index, window ->
+            // Read slightly before the window and keep whatever overlaps it, so a record that
+            // straddles the boundary is not lost to the time filter's containment rules.
+            exportRecordType(
+                writer = writer,
+                spec = spec,
+                start = window.start.minus(windowLookbackMinutes, ChronoUnit.MINUTES),
+                end = window.end,
+                label = "$label ${index + 1}/${windows.size}",
+                granted = granted,
+                states = states,
+                writtenRecordIds = writtenRecordIds,
+                predicate = { record -> overlaps(record, window) },
+            )
         }
     }
 
@@ -751,31 +834,34 @@ class HealthExportEngine(
         spec: RecordTypeSpec,
         start: Instant,
         end: Instant,
+        label: String,
         granted: Set<String>,
-        states: MutableMap<String, TypeState>,
-        writtenRecordIds: MutableSet<String>,
+        states: Map<String, TypeState>,
+        writtenRecordIds: BoundedIdSet,
         predicate: (Record) -> Boolean = { true },
         onRecord: (Record) -> Unit = {},
     ) {
         val permission = HealthPermission.getReadPermission(spec.type)
         if (permission !in granted || !start.isBefore(end)) return
         val state = states.getValue(spec.name)
+        val startedAt = System.nanoTime()
         var pageToken: String? = null
         var page = 1
         try {
             do {
                 val response = criticalHealthCall(
-                    "${spec.name}: page $page (${state.count} records saved)",
+                    "$label · ${spec.name} page $page (${state.count} saved)",
                 ) {
                     client.readRecords(
                         ReadRecordsRequest(
                             recordType = spec.type,
                             timeRangeFilter = TimeRangeFilter.between(start, end),
-                            pageSize = 1_000,
+                            pageSize = readPageSize,
                             pageToken = pageToken,
                         ),
                     )
                 }
+                state.pages += 1
                 response.records.forEach { record ->
                     if (!predicate(record)) return@forEach
                     onRecord(record)
@@ -787,10 +873,14 @@ class HealthExportEngine(
                 pageToken = response.pageToken
                 page += 1
             } while (pageToken != null)
+        } catch (error: CancellationException) {
+            throw error
         } catch (error: Throwable) {
-            if (error is CancellationException) throw error
             state.error = state.error ?: error
+            Log.w(logTag, "${spec.name} failed on page $page", error)
             onProgress("Warning: ${spec.name} failed on page $page: ${error.message}")
+        } finally {
+            state.durationMillis += elapsedMillis(startedAt)
         }
     }
 
@@ -799,8 +889,10 @@ class HealthExportEngine(
         block: suspend () -> T,
     ): T {
         onProgress(stage)
-        return try {
-            withTimeout(healthCallTimeoutMillis) { block() }
+        Log.d(logTag, stage)
+        val startedAt = System.nanoTime()
+        try {
+            return withTimeout(healthCallTimeoutMillis) { block() }
         } catch (error: TimeoutCancellationException) {
             throw IllegalStateException(
                 "$stage timed out after ${healthCallTimeoutMillis / 1_000} seconds",
@@ -810,6 +902,21 @@ class HealthExportEngine(
             throw error
         } catch (error: Throwable) {
             throw IllegalStateException("$stage failed: ${error.message ?: error.javaClass.simpleName}", error)
+        } finally {
+            recordStageTiming(stage, elapsedMillis(startedAt))
+        }
+    }
+
+    private fun recordStageTiming(stage: String, durationMillis: Long) {
+        if (durationMillis < slowStageMillis) return
+        Log.w(logTag, "Slow stage: $stage took ${durationMillis}ms")
+        if (slowStages.size < maxSlowStages) {
+            slowStages += StageTiming(stage, durationMillis)
+        } else {
+            val fastest = slowStages.withIndex().minByOrNull { it.value.durationMillis } ?: return
+            if (fastest.value.durationMillis < durationMillis) {
+                slowStages[fastest.index] = StageTiming(stage, durationMillis)
+            }
         }
     }
 
@@ -817,14 +924,14 @@ class HealthExportEngine(
         writer: BufferedWriter,
         recordType: String,
         record: Record,
-        writtenRecordIds: MutableSet<String>,
+        writtenRecordIds: BoundedIdSet,
     ): Boolean {
         val identity = record.metadata.id.ifEmpty {
             "$recordType|${recordBounds(record)}|${record.metadata.dataOrigin.packageName}|${record.hashCode()}"
         }
         if (!writtenRecordIds.add(identity)) return false
         writer.writeJsonLine(
-            jsonObjectV3(
+            jsonObject(
                 "kind" to "record",
                 "recordType" to recordType,
                 "id" to record.metadata.id,
@@ -854,45 +961,19 @@ class HealthExportEngine(
         return TimeWindow(time, time)
     }
 
-    private fun overlaps(record: Record, range: TimeWindow): Boolean =
-        recordBounds(record)?.let { it.start < range.end && it.end > range.start } == true
-
-    private fun overlaps(first: TimeWindow, windows: List<TimeWindow>): Boolean {
-        if (windows.isEmpty()) return false
-        var low = 0
-        var high = windows.lastIndex
-        var candidate = -1
-        while (low <= high) {
-            val middle = (low + high) ushr 1
-            if (windows[middle].start <= first.end) {
-                candidate = middle
-                low = middle + 1
-            } else {
-                high = middle - 1
-            }
+    private fun overlaps(record: Record, range: TimeWindow): Boolean {
+        val bounds = recordBounds(record) ?: return false
+        // Instantaneous records have no duration, so they follow the half-open range rule instead.
+        if (bounds.end == bounds.start) {
+            return !bounds.start.isBefore(range.start) && bounds.start.isBefore(range.end)
         }
-        return candidate >= 0 && windows[candidate].end >= first.start
+        return bounds.start < range.end && bounds.end > range.start
     }
 
-    private fun findOverlappingSession(
-        start: Instant,
-        end: Instant,
-        sessions: List<SessionWindow>,
-    ): SessionWindow? {
-        if (sessions.isEmpty()) return null
-        var low = 0
-        var high = sessions.lastIndex
-        var candidate = -1
-        while (low <= high) {
-            val middle = (low + high) ushr 1
-            if (sessions[middle].start <= end) {
-                candidate = middle
-                low = middle + 1
-            } else {
-                high = middle - 1
-            }
-        }
-        return sessions.getOrNull(candidate)?.takeIf { it.end >= start }
+    private fun clampTo(window: TimeWindow, range: TimeWindow): TimeWindow? {
+        val start = maxOf(window.start, range.start)
+        val end = minOf(window.end, range.end)
+        return if (start.isBefore(end)) TimeWindow(start, end) else null
     }
 
     private fun mergeWindows(windows: List<TimeWindow>): List<TimeWindow> {
@@ -910,13 +991,42 @@ class HealthExportEngine(
         return merged
     }
 
+    private fun rangeLabel(range: TimeWindow, zone: ZoneId): String {
+        val first = range.start.atZone(zone).toLocalDate()
+        val last = range.end.minusNanos(1).atZone(zone).toLocalDate()
+        return if (first == last) first.toString() else "$first…$last"
+    }
+
+    private fun elapsedMillis(startedAtNanos: Long): Long =
+        (System.nanoTime() - startedAtNanos) / 1_000_000
+
+    /**
+     * Deduplicates record ids without growing forever: duplicates only ever come from adjacent or
+     * overlapping windows, so evicting the oldest ids is safe.
+     */
+    private class BoundedIdSet(private val maxSize: Int) {
+        private val ids = LinkedHashSet<String>()
+
+        fun add(id: String): Boolean {
+            if (!ids.add(id)) return false
+            if (ids.size > maxSize) {
+                val iterator = ids.iterator()
+                iterator.next()
+                iterator.remove()
+            }
+            return true
+        }
+    }
+
     private data class RecordTypeSpec(
         val name: String,
         val type: KClass<out Record>,
     )
 
-    private data class TypeState(
+    private class TypeState(
         var count: Long = 0,
+        var pages: Int = 0,
+        var durationMillis: Long = 0,
         var error: Throwable? = null,
     )
 
@@ -931,11 +1041,21 @@ class HealthExportEngine(
         val end: Instant,
     )
 
+    private data class LocalWindow(
+        val start: LocalDateTime,
+        val end: LocalDateTime,
+    )
+
     private data class SessionWindow(
         val id: String,
         val start: Instant,
         val end: Instant,
         val title: String? = null,
+    )
+
+    private data class StageTiming(
+        val stage: String,
+        val durationMillis: Long,
     )
 
     private data class SyncPlan(
@@ -954,11 +1074,21 @@ class HealthExportEngine(
     }
 
     companion object {
-        private const val historyPermission = "android.permission.health.READ_HEALTH_DATA_HISTORY"
-        private const val backgroundPermission = "android.permission.health.READ_HEALTH_DATA_IN_BACKGROUND"
+        const val historyPermission = "android.permission.health.READ_HEALTH_DATA_HISTORY"
+        const val backgroundPermission = "android.permission.health.READ_HEALTH_DATA_IN_BACKGROUND"
+
+        private const val logTag = "OHealthExport"
         private const val ohealthPackage = "com.heytap.health.international"
-        private const val dailyAggregationChunkDays = 4_000L
+        private const val readPageSize = 1_000
+        private const val rangeChunkDays = 30L
+        private const val dailyAggregationChunkDays = 45L
+        private const val windowLookbackMinutes = 60L
         private const val fallbackOverlapDays = 7L
+        private const val maxTrackedRecordIds = 250_000
+        private const val maxChangesPages = 200
+        private const val maxAffectedDaysPerRecord = 400
+        private const val maxSlowStages = 40
+        private const val slowStageMillis = 5_000L
         private const val changesTokenTimeoutMillis = 15_000L
         private const val healthCallTimeoutMillis = 60_000L
         private val knownHistoryStartDate = LocalDate.of(2025, 4, 1)
@@ -1013,6 +1143,25 @@ class HealthExportEngine(
         private val heartRateSpec = recordTypes.first { it.type == HeartRateRecord::class }
         private val oxygenSpec = recordTypes.first { it.type == OxygenSaturationRecord::class }
         private val respiratorySpec = recordTypes.first { it.type == RespiratoryRateRecord::class }
+
+        /** Types the compact sync handles separately: session windows or daily aggregates. */
+        private val windowedTypes = setOf(
+            ExerciseSessionRecord::class,
+            SleepSessionRecord::class,
+            HeartRateRecord::class,
+            OxygenSaturationRecord::class,
+            RespiratoryRateRecord::class,
+            StepsRecord::class,
+            TotalCaloriesBurnedRecord::class,
+        )
+
+        private val permissionByTypeName = recordTypes.associate {
+            it.name to HealthPermission.getReadPermission(it.type)
+        }
+
+        val recordReadPermissions: Set<String> = permissionByTypeName.values.toSet()
+
+        val recordTypeCount: Int = recordTypes.size
     }
 }
 
@@ -1021,6 +1170,7 @@ data class EngineExportResult(
     val derivedRecordCount: Long,
     val nonEmptyTypes: Int,
     val syncMode: String,
+    val rangeCount: Int,
     val checkpointToken: String?,
     val checkpointTime: Instant?,
     val warnings: List<String>,
@@ -1031,19 +1181,19 @@ private fun BufferedWriter.writeJsonLine(value: String) {
     newLine()
 }
 
-private fun jsonObjectV3(vararg fields: Pair<String, Any?>): String = fields.joinToString(
+private fun jsonObject(vararg fields: Pair<String, Any?>): String = fields.joinToString(
     prefix = "{",
     postfix = "}",
     separator = ",",
-) { (key, value) -> "${jsonStringV3(key)}:${jsonValueV3(value)}" }
+) { (key, value) -> "${jsonString(key)}:${jsonValue(value)}" }
 
-private fun jsonValueV3(value: Any?): String = when (value) {
+private fun jsonValue(value: Any?): String = when (value) {
     null -> "null"
     is Boolean, is Number -> value.toString()
-    else -> jsonStringV3(value.toString())
+    else -> jsonString(value.toString())
 }
 
-private fun jsonStringV3(value: String): String = buildString(value.length + 2) {
+private fun jsonString(value: String): String = buildString(value.length + 2) {
     append('"')
     value.forEach { character ->
         when (character) {
