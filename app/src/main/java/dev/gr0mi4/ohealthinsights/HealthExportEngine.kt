@@ -93,6 +93,7 @@ class HealthExportEngine(
         previousSuccessfulExport: Instant?,
         diagnostic: Boolean,
         reportCollector: ReportCollector? = null,
+        requestedHistoryStartDate: LocalDate = defaultHistoryStartDate,
     ): EngineExportResult = withContext(Dispatchers.IO) {
         val granted = criticalHealthCall("Reading Health Connect permissions") {
             client.permissionController.getGrantedPermissions()
@@ -100,12 +101,12 @@ class HealthExportEngine(
         val zone = ZoneId.systemDefault()
         val exportedAt = Instant.now()
         val hasHistory = historyPermission in granted
-        val knownHistoryStart = knownHistoryStartDate.atStartOfDay(zone).toInstant()
+        val requestedHistoryStart = requestedHistoryStartDate.atStartOfDay(zone).toInstant()
         val historyStart = if (hasHistory) {
-            knownHistoryStart
+            requestedHistoryStart
         } else {
             maxOf(
-                knownHistoryStart,
+                requestedHistoryStart,
                 exportedAt.minus(30, ChronoUnit.DAYS).plus(1, ChronoUnit.MINUTES),
             )
         }
@@ -1116,7 +1117,7 @@ class HealthExportEngine(
         private const val slowStageMillis = 5_000L
         private const val changesTokenTimeoutMillis = 15_000L
         private const val healthCallTimeoutMillis = 60_000L
-        private val knownHistoryStartDate = LocalDate.of(2025, 4, 1)
+        val defaultHistoryStartDate: LocalDate = LocalDate.of(2025, 4, 1)
         private val temporalAccessorCache = mutableMapOf<Class<*>, TemporalAccessors>()
 
         private val recordTypes = listOf(

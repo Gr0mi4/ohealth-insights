@@ -42,7 +42,7 @@ Raw source data should remain immutable. Normalized datasets are derived views a
 5. **Sync** raw and normalized data to private user-controlled storage.
 6. **Analyze** history, trends, workload, recovery, sleep, activity, and any other available signals.
 
-## Android exporter 0.4.0
+## Android exporter 0.4.3
 
 The default export is a compact, gzip-compressed synchronization stream:
 
@@ -55,16 +55,24 @@ The default export is a compact, gzip-compressed synchronization stream:
 - Total calories are represented per day and per exercise session.
 - Sleep-associated oxygen saturation and respiratory rate remain granular.
 - A manual full raw diagnostic export remains available for discovery and completeness checks.
-- The initial history floor is 2025-04-01, matching the known beginning of this OHealth dataset and avoiding empty queries back to 1970.
+- The initial history floor defaults to 2025-04-01, but can be changed with the **History starts** date picker on the main screen to import older Health Connect/Zepp Life history.
+- Changing the history start date explicitly clears the incremental checkpoint, so the next compact sync safely rebuilds the selected period without deleting earlier export files.
 - Compact sync skips the 41-type discovery probe; probing remains available only in the full raw diagnostic export.
 
 ### Google Drive auto-upload
+
+Drive authorization is persisted independently from the optional Google account email. This
+prevents a successful Drive-only OAuth grant from appearing disconnected after the settings
+screen is reopened. The launcher icon carries the installed `0.4.3` version badge.
 
 After each compact sync, the app can upload three artifacts to a Drive folder tree it creates and owns (`drive.file` scope):
 
 - **Archive/** — raw `.ndjson.gz` export (full data backup)
 - **Reports/** — dated Markdown report and CSV metrics table for ChatGPT
 - **Reports/** — rolling `ohealth-latest-report.md` and `ohealth-latest-metrics.csv` updated on every sync
+
+**Test connection** provisions the whole folder tree and writes `ohealth-connection-test.txt` into the
+root folder, so a passing test proves upload access rather than folder-creation access alone.
 
 Configure OAuth and folder naming in **Drive upload settings**. See [docs/GOOGLE_DRIVE_SETUP.md](docs/GOOGLE_DRIVE_SETUP.md) for Google Cloud setup, SHA-1 registration, and ChatGPT connector instructions.
 
