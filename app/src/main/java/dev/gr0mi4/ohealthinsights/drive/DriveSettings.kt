@@ -6,6 +6,7 @@ import dev.gr0mi4.ohealthinsights.BuildConfig
 
 data class DriveSettings(
     val autoUploadEnabled: Boolean = false,
+    val driveAuthorizationGranted: Boolean = false,
     val rootFolderName: String = "OHealth Insights",
     val reportsFolderName: String = "Reports",
     val archiveFolderName: String = "Archive",
@@ -29,6 +30,10 @@ class DriveSettingsStore(context: Context) {
 
     fun load(): DriveSettings = DriveSettings(
         autoUploadEnabled = prefs.getBoolean(KEY_AUTO_UPLOAD, false),
+        driveAuthorizationGranted = prefs.getBoolean(
+            KEY_DRIVE_AUTHORIZATION_GRANTED,
+            !prefs.getString(KEY_ACCOUNT_EMAIL, null).isNullOrBlank(),
+        ),
         rootFolderName = prefs.getString(KEY_ROOT_FOLDER, "OHealth Insights") ?: "OHealth Insights",
         reportsFolderName = prefs.getString(KEY_REPORTS_FOLDER, "Reports") ?: "Reports",
         archiveFolderName = prefs.getString(KEY_ARCHIVE_FOLDER, "Archive") ?: "Archive",
@@ -56,6 +61,7 @@ class DriveSettingsStore(context: Context) {
     fun save(settings: DriveSettings) {
         prefs.edit()
             .putBoolean(KEY_AUTO_UPLOAD, settings.autoUploadEnabled)
+            .putBoolean(KEY_DRIVE_AUTHORIZATION_GRANTED, settings.driveAuthorizationGranted)
             .putString(KEY_ROOT_FOLDER, settings.rootFolderName)
             .putString(KEY_REPORTS_FOLDER, settings.reportsFolderName)
             .putString(KEY_ARCHIVE_FOLDER, settings.archiveFolderName)
@@ -96,6 +102,7 @@ class DriveSettingsStore(context: Context) {
     fun clearAccount() {
         prefs.edit()
             .remove(KEY_ACCOUNT_EMAIL)
+            .remove(KEY_DRIVE_AUTHORIZATION_GRANTED)
             .remove(KEY_ROOT_FOLDER_ID)
             .remove(KEY_REPORTS_FOLDER_ID)
             .remove(KEY_ARCHIVE_FOLDER_ID)
@@ -110,6 +117,7 @@ class DriveSettingsStore(context: Context) {
         private const val PREFS_NAME = "ohealth_drive_settings"
 
         private const val KEY_AUTO_UPLOAD = "auto_upload"
+        private const val KEY_DRIVE_AUTHORIZATION_GRANTED = "drive_authorization_granted"
         private const val KEY_ROOT_FOLDER = "root_folder_name"
         private const val KEY_REPORTS_FOLDER = "reports_folder_name"
         private const val KEY_ARCHIVE_FOLDER = "archive_folder_name"
