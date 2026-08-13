@@ -25,7 +25,7 @@ class DriveUploader(
         settingsStore.isConfigured() &&
             settings.autoUploadEnabled &&
             !diagnostic &&
-            !settings.googleAccountEmail.isNullOrBlank()
+            settings.driveAuthorizationGranted
 
     suspend fun uploadAfterSync(
         rawFile: File,
