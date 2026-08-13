@@ -20,8 +20,8 @@ android {
         applicationId = "dev.gr0mi4.ohealthinsights"
         minSdk = 28
         targetSdk = 35
-        versionCode = 9
-        versionName = "0.4.1"
+        versionCode = 10
+        versionName = "0.4.2"
         buildConfigField(
             "String",
             "DRIVE_OAUTH_CLIENT_ID",
