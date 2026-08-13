@@ -1,5 +1,7 @@
 package dev.gr0mi4.ohealthinsights
 
+import android.app.AlertDialog
+import android.app.DatePickerDialog
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Intent
@@ -35,6 +37,7 @@ import androidx.health.connect.client.PermissionController
 import androidx.lifecycle.lifecycleScope
 import java.io.File
 import java.time.Instant
+import java.time.LocalDate
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import java.util.concurrent.atomic.AtomicReference
@@ -53,6 +56,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var fullExportButton: Button
     private lateinit var copyLogButton: Button
     private lateinit var settingsButton: Button
+    private lateinit var historyStartButton: Button
     private lateinit var progressBar: ProgressBar
 
     private lateinit var driveSettingsStore: DriveSettingsStore
@@ -202,6 +206,11 @@ class MainActivity : ComponentActivity() {
             setOnClickListener { startActivity(Intent(this@MainActivity, SettingsActivity::class.java)) }
         }
 
+        historyStartButton = Button(this).apply {
+            updateHistoryStartButton()
+            setOnClickListener { chooseHistoryStartDate() }
+        }
+
         progressBar = ProgressBar(this).apply {
             visibility = View.GONE
         }
@@ -214,6 +223,7 @@ class MainActivity : ComponentActivity() {
             addView(permissionsButton, matchWrap(top = 16))
             addView(exportButton, matchWrap(top = 8))
             addView(fullExportButton, matchWrap(top = 8))
+            addView(historyStartButton, matchWrap(top = 8))
             addView(copyLogButton, matchWrap(top = 8))
             addView(settingsButton, matchWrap(top = 8))
             addView(progressBar, wrapWrap(top = 12))
@@ -269,6 +279,7 @@ class MainActivity : ComponentActivity() {
             val history = HealthExportEngine.historyPermission in granted
             val background = HealthExportEngine.backgroundPermission in granted
             val preferences = getSharedPreferences(syncPreferencesName, MODE_PRIVATE)
+            val configuredHistoryStart = loadHistoryStartDate()
             val hasCheckpoint = !preferences.getString(lastSuccessfulExportKey, null).isNullOrBlank()
             val hasChangesToken = !preferences.getString(changesTokenKey, null).isNullOrBlank()
 
@@ -290,6 +301,7 @@ class MainActivity : ComponentActivity() {
                         else -> "first full sync required"
                     },
                 )
+                appendLine("History start date: $configuredHistoryStart")
                 appendLine(
                     "Drive auto-upload: " + when {
                         !driveSettingsStore.isConfigured() -> "not configured (missing OAuth client ID)"
@@ -305,6 +317,7 @@ class MainActivity : ComponentActivity() {
                 )
             }
             exportButton.text = if (hasCheckpoint) "Sync new data" else "Create first full sync"
+            updateHistoryStartButton()
             exportButton.isEnabled = grantedRecordTypes > 0
             fullExportButton.isEnabled = grantedRecordTypes > 0
         }
@@ -363,6 +376,7 @@ class MainActivity : ComponentActivity() {
                     previousSuccessfulExport = previousExport,
                     diagnostic = diagnostic,
                     reportCollector = reportCollector,
+                    requestedHistoryStartDate = loadHistoryStartDate(),
                 )
             }
             timer.cancel()
@@ -547,6 +561,62 @@ class MainActivity : ComponentActivity() {
         Toast.makeText(this, "Diagnostics copied", Toast.LENGTH_SHORT).show()
     }
 
+    private fun loadHistoryStartDate(): LocalDate {
+        val stored = getSharedPreferences(syncPreferencesName, MODE_PRIVATE)
+            .getString(historyStartDateKey, null)
+        return stored?.let { runCatching { LocalDate.parse(it) }.getOrNull() }
+            ?: HealthExportEngine.defaultHistoryStartDate
+    }
+
+    private fun updateHistoryStartButton() {
+        if (::historyStartButton.isInitialized) {
+            historyStartButton.text = "History starts: ${loadHistoryStartDate()}"
+        }
+    }
+
+    private fun chooseHistoryStartDate() {
+        val current = loadHistoryStartDate()
+        DatePickerDialog(
+            this,
+            { _, year, month, day ->
+                val selected = LocalDate.of(year, month + 1, day)
+                if (selected == current) return@DatePickerDialog
+                confirmHistoryStartDate(selected)
+            },
+            current.year,
+            current.monthValue - 1,
+            current.dayOfMonth,
+        ).apply {
+            datePicker.maxDate = System.currentTimeMillis()
+        }.show()
+    }
+
+    private fun confirmHistoryStartDate(selected: LocalDate) {
+        AlertDialog.Builder(this)
+            .setTitle("Start history from $selected?")
+            .setMessage(
+                "This clears the incremental checkpoint. The next compact sync will be a new full " +
+                    "sync from the selected date. Existing exported files are not deleted.",
+            )
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Use date") { _, _ ->
+                val saved = getSharedPreferences(syncPreferencesName, MODE_PRIVATE)
+                    .edit()
+                    .putString(historyStartDateKey, selected.toString())
+                    .remove(changesTokenKey)
+                    .remove(lastSuccessfulExportKey)
+                    .commit()
+                if (saved) {
+                    updateHistoryStartButton()
+                    refreshPermissionState()
+                    Toast.makeText(this, "Next sync will start from $selected", Toast.LENGTH_LONG).show()
+                } else {
+                    Toast.makeText(this, "Could not save history date", Toast.LENGTH_LONG).show()
+                }
+            }
+            .show()
+    }
+
     private fun sdkStatusName(): String = when (sdkStatus) {
         HealthConnectClient.SDK_AVAILABLE -> "available"
         HealthConnectClient.SDK_UNAVAILABLE_PROVIDER_UPDATE_REQUIRED -> "update required"
@@ -627,6 +697,7 @@ class MainActivity : ComponentActivity() {
         private const val syncPreferencesName = "ohealth_sync_state"
         private const val changesTokenKey = "changes_token_v1"
         private const val lastSuccessfulExportKey = "last_successful_export_v1"
+        private const val historyStartDateKey = "history_start_date_v1"
         private const val progressRefreshMillis = 500L
         private const val visibleStageCount = 6
 
