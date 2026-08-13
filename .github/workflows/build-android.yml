@@ -36,17 +36,24 @@ jobs:
           gradle-version: "8.11.1"
 
       - name: Restore signing keystore
-        if: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          DRIVE_OAUTH_CLIENT_ID: ${{ secrets.DRIVE_OAUTH_CLIENT_ID }}
         run: |
+          if [ -z "$ANDROID_KEYSTORE_BASE64" ]; then
+            echo "No signing keystore secret configured; using default debug signing."
+            exit 0
+          fi
           echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > release.keystore
           cat >> local.properties <<EOF
           RELEASE_STORE_FILE=release.keystore
-          RELEASE_STORE_PASSWORD=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          RELEASE_KEY_ALIAS=${{ secrets.ANDROID_KEY_ALIAS }}
-          RELEASE_KEY_PASSWORD=${{ secrets.ANDROID_KEY_PASSWORD }}
-          DRIVE_OAUTH_CLIENT_ID=${{ secrets.DRIVE_OAUTH_CLIENT_ID }}
+          RELEASE_STORE_PASSWORD=${ANDROID_KEYSTORE_PASSWORD}
+          RELEASE_KEY_ALIAS=${ANDROID_KEY_ALIAS}
+          RELEASE_KEY_PASSWORD=${ANDROID_KEY_PASSWORD}
+          DRIVE_OAUTH_CLIENT_ID=${DRIVE_OAUTH_CLIENT_ID}
           EOF
 
       - name: Build debug APK
