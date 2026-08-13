@@ -468,7 +468,8 @@ class MainActivity : ComponentActivity() {
                 onProgress = { message ->
                     stageForUpload.set(message)
                     debugLog.add(message, SystemClock.elapsedRealtime() - startedAt)
-                    renderProgress(message, startedAt)
+                    // The uploader reports progress from a background thread.
+                    runOnUiThread { renderProgress(message, startedAt) }
                 },
                 launchAuth = { request -> requestDriveAuthorization(request) },
             )

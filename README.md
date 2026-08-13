@@ -42,7 +42,7 @@ Raw source data should remain immutable. Normalized datasets are derived views a
 5. **Sync** raw and normalized data to private user-controlled storage.
 6. **Analyze** history, trends, workload, recovery, sleep, activity, and any other available signals.
 
-## Android exporter 0.4.2
+## Android exporter 0.4.3
 
 The default export is a compact, gzip-compressed synchronization stream:
 
@@ -63,13 +63,16 @@ The default export is a compact, gzip-compressed synchronization stream:
 
 Drive authorization is persisted independently from the optional Google account email. This
 prevents a successful Drive-only OAuth grant from appearing disconnected after the settings
-screen is reopened. The launcher icon carries the installed `0.4.2` version badge.
+screen is reopened. The launcher icon carries the installed `0.4.3` version badge.
 
 After each compact sync, the app can upload three artifacts to a Drive folder tree it creates and owns (`drive.file` scope):
 
 - **Archive/** — raw `.ndjson.gz` export (full data backup)
 - **Reports/** — dated Markdown report and CSV metrics table for ChatGPT
 - **Reports/** — rolling `ohealth-latest-report.md` and `ohealth-latest-metrics.csv` updated on every sync
+
+**Test connection** provisions the whole folder tree and writes `ohealth-connection-test.txt` into the
+root folder, so a passing test proves upload access rather than folder-creation access alone.
 
 Configure OAuth and folder naming in **Drive upload settings**. See [docs/GOOGLE_DRIVE_SETUP.md](docs/GOOGLE_DRIVE_SETUP.md) for Google Cloud setup, SHA-1 registration, and ChatGPT connector instructions.
 

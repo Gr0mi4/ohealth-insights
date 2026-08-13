@@ -45,10 +45,9 @@ class DriveUploader(
                 appVersion = BuildConfig.VERSION_NAME,
             ),
         )
-        val report = reportBuilder.buildMarkdown(summary, exportedAt, sessionWorkouts)
-        val csv = reportBuilder.buildCsv()
-
         return withContext(Dispatchers.IO) {
+            val report = reportBuilder.buildMarkdown(summary, exportedAt, sessionWorkouts)
+            val csv = reportBuilder.buildCsv()
             DriveClient(token).uploadSyncBundle(
                 settings = settings,
                 names = names,

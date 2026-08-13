@@ -4,6 +4,7 @@ import java.io.File
 import java.io.IOException
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
+import java.util.concurrent.TimeUnit
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -14,7 +15,7 @@ import org.json.JSONObject
 
 class DriveClient(
     private val accessToken: String,
-    private val httpClient: OkHttpClient = OkHttpClient(),
+    private val httpClient: OkHttpClient = sharedClient,
 ) {
     suspend fun uploadSyncBundle(
         settings: DriveSettings,
@@ -87,12 +88,26 @@ class DriveClient(
         )
     }
 
-    fun testConnection(settings: DriveSettings): String {
+    // Creating a folder only proves metadata access, so the probe also writes a real
+    // file: that is the operation that actually fails when uploads are misconfigured.
+    fun testConnection(settings: DriveSettings): DriveConnectionCheck {
         val rootId = ensureFolder(settings.rootFolderName, settings.rootFolderId, parentId = null)
-        val query = "name='${escapeQuery(settings.reportsFolderName)}' and " +
-            "'$rootId' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"
-        val files = listFiles(query)
-        return "Connected. Root folder id: $rootId (${files.size} child lookup ok)."
+        val reportsId = ensureFolder(settings.reportsFolderName, settings.reportsFolderId, parentId = rootId)
+        val archiveId = ensureFolder(settings.archiveFolderName, settings.archiveFolderId, parentId = rootId)
+        upsertTextFile(
+            name = CONNECTION_PROBE_NAME,
+            mimeType = "text/plain",
+            parentId = rootId,
+            content = "OHealth Insights write check at ${java.time.Instant.now()}\n",
+            existingFileId = null,
+        )
+        return DriveConnectionCheck(
+            rootFolderId = rootId,
+            reportsFolderId = reportsId,
+            archiveFolderId = archiveId,
+            message = "Connected. Folders ready and $CONNECTION_PROBE_NAME written to " +
+                "${settings.rootFolderName}.",
+        )
     }
 
     private fun ensureFolder(name: String, cachedId: String?, parentId: String?): String {
@@ -143,8 +158,10 @@ class DriveClient(
     }
 
     private fun updateTextFile(fileId: String, mimeType: String, content: String): String {
+        // Replacing file content must go through the upload endpoint; the plain
+        // /drive/v3 endpoint only accepts JSON metadata and rejects the body.
         val request = Request.Builder()
-            .url("$BASE/files/$fileId?uploadType=media")
+            .url("$UPLOAD/$fileId?uploadType=media")
             .patch(content.toRequestBody(mimeType.toMediaType()))
             .header("Authorization", authHeader())
             .build()
@@ -198,7 +215,6 @@ class DriveClient(
                 .url(uploadUrl)
                 .put(source.asRequestBody(mimeType.toMediaType()))
                 .header("Authorization", authHeader())
-                .header("Content-Length", source.length().toString())
                 .build()
             return JSONObject(execute(uploadRequest)).getString("id")
         }
@@ -286,5 +302,14 @@ class DriveClient(
         private const val UPLOAD = "https://www.googleapis.com/upload/drive/v3/files"
         private val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
         private const val MULTIPART_LIMIT_BYTES = 5L * 1024 * 1024
+        private const val CONNECTION_PROBE_NAME = "ohealth-connection-test.txt"
+
+        // Uploads run over mobile networks and can carry several megabytes, so the
+        // stock ten-second OkHttp timeouts are far too aggressive here.
+        private val sharedClient = OkHttpClient.Builder()
+            .connectTimeout(30, TimeUnit.SECONDS)
+            .readTimeout(60, TimeUnit.SECONDS)
+            .writeTimeout(5, TimeUnit.MINUTES)
+            .build()
     }
 }

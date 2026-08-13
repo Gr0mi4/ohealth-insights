@@ -171,6 +171,13 @@ data class ResolvedDriveNames(
     val latestCsvName: String,
 )
 
+data class DriveConnectionCheck(
+    val rootFolderId: String,
+    val reportsFolderId: String,
+    val archiveFolderId: String,
+    val message: String,
+)
+
 data class DriveUploadResult(
     val rootFolderId: String,
     val reportsFolderId: String,

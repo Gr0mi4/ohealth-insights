@@ -241,9 +241,14 @@ class SettingsActivity : ComponentActivity() {
                 withContext(Dispatchers.IO) {
                     DriveClient(token).testConnection(settings)
                 }
-            }.onSuccess { message ->
+            }.onSuccess { check ->
                 settingsStore.save(currentSettings().copy(driveAuthorizationGranted = true))
-                statusText.text = message
+                settingsStore.updateFolderIds(
+                    rootFolderId = check.rootFolderId,
+                    reportsFolderId = check.reportsFolderId,
+                    archiveFolderId = check.archiveFolderId,
+                )
+                statusText.text = check.message
             }.onFailure {
                 statusText.text = "Test failed: ${it.message}"
             }
