@@ -282,6 +282,7 @@ class MainActivity : ComponentActivity() {
             val configuredHistoryStart = loadHistoryStartDate()
             val hasCheckpoint = !preferences.getString(lastSuccessfulExportKey, null).isNullOrBlank()
             val hasChangesToken = !preferences.getString(changesTokenKey, null).isNullOrBlank()
+            val driveSettings = driveSettingsStore.load()
 
             detailsText.text = buildString {
                 appendLine("Version ${BuildConfig.VERSION_NAME}")
@@ -305,8 +306,9 @@ class MainActivity : ComponentActivity() {
                 appendLine(
                     "Drive auto-upload: " + when {
                         !driveSettingsStore.isConfigured() -> "not configured (missing OAuth client ID)"
-                        driveSettingsStore.load().autoUploadEnabled -> "enabled"
-                        else -> "disabled"
+                        !driveSettings.autoUploadEnabled -> "disabled"
+                        !driveSettings.driveAuthorizationGranted -> "enabled; connect Google Drive"
+                        else -> "enabled and connected"
                     },
                 )
                 appendLine()
