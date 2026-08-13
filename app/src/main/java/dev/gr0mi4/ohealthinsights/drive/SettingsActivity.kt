@@ -160,8 +160,12 @@ class SettingsActivity : ComponentActivity() {
         rawTemplateInput.setText(settings.rawFileTemplate)
         latestReportInput.setText(settings.latestReportName)
         latestCsvInput.setText(settings.latestCsvName)
-        statusText.text = settings.googleAccountEmail?.let { "Connected as $it" }
-            ?: "Not connected. Tap Connect Google account."
+        statusText.text = when {
+            settings.driveAuthorizationGranted && !settings.googleAccountEmail.isNullOrBlank() ->
+                "Connected as ${settings.googleAccountEmail}"
+            settings.driveAuthorizationGranted -> "Connected to Google Drive."
+            else -> "Not connected. Tap Connect Google account."
+        }
     }
 
     private fun currentSettings(): DriveSettings {
@@ -212,8 +216,16 @@ class SettingsActivity : ComponentActivity() {
     }
 
     private suspend fun handleAuthorizationSuccess(result: AuthorizationResult) {
+        require(!result.accessToken.isNullOrBlank()) {
+            "Google authorization returned no Drive access token."
+        }
         val email = result.toGoogleSignInAccount()?.email
-        settingsStore.save(currentSettings().copy(googleAccountEmail = email))
+        settingsStore.save(
+            currentSettings().copy(
+                googleAccountEmail = email,
+                driveAuthorizationGranted = true,
+            ),
+        )
         withContext(Dispatchers.Main) {
             statusText.text = email?.let { "Connected as $it" } ?: "Connected to Google Drive."
             Toast.makeText(this@SettingsActivity, "Google account connected", Toast.LENGTH_SHORT).show()
@@ -230,6 +242,7 @@ class SettingsActivity : ComponentActivity() {
                     DriveClient(token).testConnection(settings)
                 }
             }.onSuccess { message ->
+                settingsStore.save(currentSettings().copy(driveAuthorizationGranted = true))
                 statusText.text = message
             }.onFailure {
                 statusText.text = "Test failed: ${it.message}"
@@ -239,7 +252,12 @@ class SettingsActivity : ComponentActivity() {
 
     private fun disconnectAccount() {
         settingsStore.clearAccount()
-        settingsStore.save(currentSettings().copy(googleAccountEmail = null))
+        settingsStore.save(
+            currentSettings().copy(
+                googleAccountEmail = null,
+                driveAuthorizationGranted = false,
+            ),
+        )
         statusText.text = "Disconnected locally. Reconnect anytime from this screen."
         Toast.makeText(this, "Google account disconnected", Toast.LENGTH_SHORT).show()
     }
