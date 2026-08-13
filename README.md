@@ -42,7 +42,7 @@ Raw source data should remain immutable. Normalized datasets are derived views a
 5. **Sync** raw and normalized data to private user-controlled storage.
 6. **Analyze** history, trends, workload, recovery, sleep, activity, and any other available signals.
 
-## Android exporter 0.4.1
+## Android exporter 0.4.2
 
 The default export is a compact, gzip-compressed synchronization stream:
 
@@ -60,6 +60,10 @@ The default export is a compact, gzip-compressed synchronization stream:
 - Compact sync skips the 41-type discovery probe; probing remains available only in the full raw diagnostic export.
 
 ### Google Drive auto-upload
+
+Drive authorization is persisted independently from the optional Google account email. This
+prevents a successful Drive-only OAuth grant from appearing disconnected after the settings
+screen is reopened. The launcher icon carries the installed `0.4.2` version badge.
 
 After each compact sync, the app can upload three artifacts to a Drive folder tree it creates and owns (`drive.file` scope):
 
