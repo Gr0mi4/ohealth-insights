@@ -42,7 +42,7 @@ Raw source data should remain immutable. Normalized datasets are derived views a
 5. **Sync** raw and normalized data to private user-controlled storage.
 6. **Analyze** history, trends, workload, recovery, sleep, activity, and any other available signals.
 
-## Android exporter 0.4.0
+## Android exporter 0.4.1
 
 The default export is a compact, gzip-compressed synchronization stream:
 
@@ -55,7 +55,8 @@ The default export is a compact, gzip-compressed synchronization stream:
 - Total calories are represented per day and per exercise session.
 - Sleep-associated oxygen saturation and respiratory rate remain granular.
 - A manual full raw diagnostic export remains available for discovery and completeness checks.
-- The initial history floor is 2025-04-01, matching the known beginning of this OHealth dataset and avoiding empty queries back to 1970.
+- The initial history floor defaults to 2025-04-01, but can be changed with the **History starts** date picker on the main screen to import older Health Connect/Zepp Life history.
+- Changing the history start date explicitly clears the incremental checkpoint, so the next compact sync safely rebuilds the selected period without deleting earlier export files.
 - Compact sync skips the 41-type discovery probe; probing remains available only in the full raw diagnostic export.
 
 ### Google Drive auto-upload
