@@ -2,6 +2,9 @@
 .gradle/
 .idea/
 local.properties
+release.keystore
+*.jks
+*.p12
 build/
 */build/
 captures/

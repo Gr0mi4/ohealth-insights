@@ -55,6 +55,7 @@ import androidx.health.connect.client.request.AggregateRequest
 import androidx.health.connect.client.request.ChangesTokenRequest
 import androidx.health.connect.client.request.ReadRecordsRequest
 import androidx.health.connect.client.time.TimeRangeFilter
+import dev.gr0mi4.ohealthinsights.drive.ReportCollector
 import java.io.BufferedWriter
 import java.io.File
 import java.time.Instant
@@ -91,6 +92,7 @@ class HealthExportEngine(
         previousChangesToken: String?,
         previousSuccessfulExport: Instant?,
         diagnostic: Boolean,
+        reportCollector: ReportCollector? = null,
     ): EngineExportResult = withContext(Dispatchers.IO) {
         val granted = criticalHealthCall("Reading Health Connect permissions") {
             client.permissionController.getGrantedPermissions()
@@ -204,6 +206,7 @@ class HealthExportEngine(
                         writtenRecordIds = writtenRecordIds,
                         writtenWorkoutEnergyIds = writtenWorkoutEnergyIds,
                         writtenDailyDates = writtenDailyDates,
+                        reportCollector = reportCollector,
                     )
                 }
 
@@ -567,6 +570,7 @@ class HealthExportEngine(
         writtenRecordIds: BoundedIdSet,
         writtenWorkoutEnergyIds: MutableSet<String>,
         writtenDailyDates: MutableSet<LocalDate>,
+        reportCollector: ReportCollector?,
     ): Long {
         val workouts = mutableListOf<SessionWindow>()
         val sleeps = mutableListOf<TimeWindow>()
@@ -607,6 +611,7 @@ class HealthExportEngine(
             onRecord = { record ->
                 if (record is SleepSessionRecord) {
                     sleeps += TimeWindow(record.startTime, record.endTime)
+                    reportCollector?.onSleepSession(record.startTime, record.endTime)
                 }
             },
         )
@@ -659,13 +664,14 @@ class HealthExportEngine(
             writtenRecordIds = writtenRecordIds,
         )
 
-        var derived = exportDailyActivity(writer, range, label, granted, writtenDailyDates)
+        var derived = exportDailyActivity(writer, range, label, granted, writtenDailyDates, reportCollector)
         derived += exportWorkoutEnergy(
             writer = writer,
             workouts = workouts,
             label = label,
             granted = granted,
             writtenWorkoutEnergyIds = writtenWorkoutEnergyIds,
+            reportCollector = reportCollector,
         )
         return derived
     }
@@ -676,6 +682,7 @@ class HealthExportEngine(
         label: String,
         granted: Set<String>,
         writtenDailyDates: MutableSet<LocalDate>,
+        reportCollector: ReportCollector?,
     ): Long {
         val canReadSteps = HealthPermission.getReadPermission(StepsRecord::class) in granted
         val canReadCalories = HealthPermission.getReadPermission(TotalCaloriesBurnedRecord::class) in granted
@@ -739,6 +746,14 @@ class HealthExportEngine(
                         ?.joinToString(","),
                 ),
             )
+            reportCollector?.onDailyActivity(
+                date = date,
+                stepsTotal = total?.get(StepsRecord.COUNT_TOTAL),
+                stepsOHealth = ohealthSteps[date]?.result?.get(StepsRecord.COUNT_TOTAL),
+                totalCaloriesKcal = total
+                    ?.get(TotalCaloriesBurnedRecord.ENERGY_TOTAL)
+                    ?.inKilocalories,
+            )
             written += 1
         }
         writer.flush()
@@ -765,6 +780,7 @@ class HealthExportEngine(
         label: String,
         granted: Set<String>,
         writtenWorkoutEnergyIds: MutableSet<String>,
+        reportCollector: ReportCollector?,
     ): Long {
         if (HealthPermission.getReadPermission(TotalCaloriesBurnedRecord::class) !in granted) return 0
         var count = 0L
@@ -795,6 +811,15 @@ class HealthExportEngine(
                     "status" to if (result.isSuccess) "complete" else "failed",
                     "message" to result.exceptionOrNull()?.message,
                 ),
+            )
+            reportCollector?.onWorkoutEnergy(
+                sessionId = workout.id,
+                title = workout.title,
+                startTime = workout.start,
+                endTime = workout.end,
+                caloriesKcal = result.getOrNull()
+                    ?.get(TotalCaloriesBurnedRecord.ENERGY_TOTAL)
+                    ?.inKilocalories,
             )
             count += 1
         }

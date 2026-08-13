@@ -17,7 +17,19 @@ import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import com.google.android.gms.auth.api.identity.AuthorizationResult
+import com.google.android.gms.auth.api.identity.Identity
+import dev.gr0mi4.ohealthinsights.drive.DriveSettingsStore
+import dev.gr0mi4.ohealthinsights.drive.DriveUploader
+import dev.gr0mi4.ohealthinsights.drive.MetricsStore
+import dev.gr0mi4.ohealthinsights.drive.ReportBuilder
+import dev.gr0mi4.ohealthinsights.drive.ReportCollector
+import dev.gr0mi4.ohealthinsights.drive.SettingsActivity
+import dev.gr0mi4.ohealthinsights.drive.WorkoutMetric
+import kotlin.coroutines.resume
+import kotlin.coroutines.suspendCoroutine
 import androidx.health.connect.client.HealthConnectClient
 import androidx.health.connect.client.PermissionController
 import androidx.lifecycle.lifecycleScope
@@ -40,13 +52,36 @@ class MainActivity : ComponentActivity() {
     private lateinit var exportButton: Button
     private lateinit var fullExportButton: Button
     private lateinit var copyLogButton: Button
+    private lateinit var settingsButton: Button
     private lateinit var progressBar: ProgressBar
 
+    private lateinit var driveSettingsStore: DriveSettingsStore
+    private lateinit var metricsStore: MetricsStore
+    private lateinit var driveUploader: DriveUploader
+
     private val debugLog = DebugLog()
+    private val stageForUpload = AtomicReference("")
     private var healthConnectClient: HealthConnectClient? = null
     private var sdkStatus: Int = HealthConnectClient.SDK_UNAVAILABLE
     private var pendingExport: File? = null
     private var pendingCheckpoint: PendingCheckpoint? = null
+
+    private var pendingDriveAuthContinuation: ((AuthorizationResult?) -> Unit)? = null
+
+    private val driveAuthLauncher = registerForActivityResult(
+        ActivityResultContracts.StartIntentSenderForResult(),
+    ) { result ->
+        val continuation = pendingDriveAuthContinuation
+        pendingDriveAuthContinuation = null
+        if (result.resultCode != RESULT_OK || result.data == null) {
+            continuation?.invoke(null)
+            return@registerForActivityResult
+        }
+        val authResult = runCatching {
+            Identity.getAuthorizationClient(this).getAuthorizationResultFromIntent(result.data!!)
+        }.getOrNull()
+        continuation?.invoke(authResult)
+    }
 
     private val permissionLauncher = registerForActivityResult(
         PermissionController.createRequestPermissionResultContract(),
@@ -116,6 +151,9 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        driveSettingsStore = DriveSettingsStore(this)
+        metricsStore = MetricsStore(this)
+        driveUploader = DriveUploader(this, driveSettingsStore, ReportBuilder(metricsStore))
         createUi()
         initializeHealthConnect()
     }
@@ -159,6 +197,11 @@ class MainActivity : ComponentActivity() {
             setOnClickListener { copyDiagnostics() }
         }
 
+        settingsButton = Button(this).apply {
+            text = "Drive upload settings"
+            setOnClickListener { startActivity(Intent(this@MainActivity, SettingsActivity::class.java)) }
+        }
+
         progressBar = ProgressBar(this).apply {
             visibility = View.GONE
         }
@@ -172,6 +215,7 @@ class MainActivity : ComponentActivity() {
             addView(exportButton, matchWrap(top = 8))
             addView(fullExportButton, matchWrap(top = 8))
             addView(copyLogButton, matchWrap(top = 8))
+            addView(settingsButton, matchWrap(top = 8))
             addView(progressBar, wrapWrap(top = 12))
             addView(detailsText, matchWrap(top = 16))
         }
@@ -246,6 +290,13 @@ class MainActivity : ComponentActivity() {
                         else -> "first full sync required"
                     },
                 )
+                appendLine(
+                    "Drive auto-upload: " + when {
+                        !driveSettingsStore.isConfigured() -> "not configured (missing OAuth client ID)"
+                        driveSettingsStore.load().autoUploadEnabled -> "enabled"
+                        else -> "disabled"
+                    },
+                )
                 appendLine()
                 append(
                     "Heart rate, oxygen and breathing are read inside workout and sleep windows only. " +
@@ -274,13 +325,23 @@ class MainActivity : ComponentActivity() {
                 preferences.getString(lastSuccessfulExportKey, null)
                     ?.let { runCatching { Instant.parse(it) }.getOrNull() }
             }
+            val driveSettings = driveSettingsStore.load()
+            val autoUpload = driveUploader.canAutoUpload(driveSettings, diagnostic)
+            val reportCollector = if (autoUpload || !diagnostic) {
+                ReportCollector(metricsStore)
+            } else {
+                null
+            }
+            val exportedAt = Instant.now()
             val startedAt = SystemClock.elapsedRealtime()
             val stage = AtomicReference(
                 if (diagnostic) "Starting full raw diagnostic export" else "Starting compact sync",
             )
 
             debugLog.clear()
-            debugLog.add("Export started (diagnostic=$diagnostic, version=${BuildConfig.VERSION_NAME})")
+            debugLog.add(
+                "Export started (diagnostic=$diagnostic, autoUpload=$autoUpload, version=${BuildConfig.VERSION_NAME})",
+            )
             debugLog.add(stage.get())
             renderProgress(stage.get(), startedAt)
 
@@ -301,38 +362,38 @@ class MainActivity : ComponentActivity() {
                     previousChangesToken = previousToken,
                     previousSuccessfulExport = previousExport,
                     diagnostic = diagnostic,
+                    reportCollector = reportCollector,
                 )
             }
             timer.cancel()
             result.exceptionOrNull()?.let { if (it is CancellationException) throw it }
 
             result.onSuccess { summary ->
-                pendingExport = file
-                pendingCheckpoint = summary.checkpointTime?.let {
-                    PendingCheckpoint(summary.checkpointToken, it)
-                }
                 debugLog.add(
                     "Export finished: ${summary.syncMode}, ${summary.rawRecordCount} raw records, " +
                         "${summary.derivedRecordCount} summaries",
                     SystemClock.elapsedRealtime() - startedAt,
                 )
-                statusText.text = "Export ready to save"
-                detailsText.text = buildString {
-                    appendLine("EXPORT COMPLETE in ${elapsedText(startedAt)}")
-                    appendLine("Mode: ${summary.syncMode} over ${summary.rangeCount} time ranges")
-                    appendLine("Raw records: ${summary.rawRecordCount}")
-                    appendLine("Compact summaries: ${summary.derivedRecordCount}")
-                    appendLine("Non-empty types: ${summary.nonEmptyTypes}")
-                    if (summary.warnings.isNotEmpty()) {
-                        appendLine()
-                        appendLine("WARNINGS (${summary.warnings.size})")
-                        summary.warnings.forEach { warning ->
-                            appendLine("• $warning")
-                            debugLog.add("Warning: $warning")
-                        }
+                if (autoUpload) {
+                    uploadToDrive(
+                        file = file,
+                        summary = summary,
+                        exportedAt = exportedAt,
+                        sessionWorkouts = reportCollector?.sessionWorkouts().orEmpty(),
+                        checkpoint = summary.checkpointTime?.let {
+                            PendingCheckpoint(summary.checkpointToken, it)
+                        },
+                        startedAt = startedAt,
+                    )
+                } else {
+                    pendingExport = file
+                    pendingCheckpoint = summary.checkpointTime?.let {
+                        PendingCheckpoint(summary.checkpointToken, it)
                     }
+                    statusText.text = "Export ready to save"
+                    detailsText.text = buildExportSummary(summary, startedAt)
+                    saveDocumentLauncher.launch(exportFileName(summary.syncMode))
                 }
-                saveDocumentLauncher.launch(exportFileName(summary.syncMode))
             }.onFailure { error ->
                 file.delete()
                 debugLog.add(
@@ -369,6 +430,100 @@ class MainActivity : ComponentActivity() {
                 appendLine()
                 appendLine("RECENT STAGES")
                 recent.forEach { appendLine(it) }
+            }
+        }
+    }
+
+    private suspend fun uploadToDrive(
+        file: File,
+        summary: EngineExportResult,
+        exportedAt: Instant,
+        sessionWorkouts: List<WorkoutMetric>,
+        checkpoint: PendingCheckpoint?,
+        startedAt: Long,
+    ) {
+        statusText.text = "Uploading to Google Drive"
+        val uploadResult = runCatching {
+            driveUploader.uploadAfterSync(
+                rawFile = file,
+                summary = summary,
+                exportedAt = exportedAt,
+                sessionWorkouts = sessionWorkouts,
+                onProgress = { message ->
+                    stageForUpload.set(message)
+                    debugLog.add(message, SystemClock.elapsedRealtime() - startedAt)
+                    renderProgress(message, startedAt)
+                },
+                launchAuth = { request -> requestDriveAuthorization(request) },
+            )
+        }
+        uploadResult.onSuccess { result ->
+            file.delete()
+            val checkpointSaved = checkpoint?.let { persistCheckpoint(it) } ?: true
+            debugLog.add(
+                "Drive upload complete: ${result.uploadedFiles.joinToString()}",
+                SystemClock.elapsedRealtime() - startedAt,
+            )
+            statusText.text = if (checkpointSaved) "Sync uploaded to Drive" else "Uploaded; checkpoint failed"
+            detailsText.text = buildString {
+                append(buildExportSummary(summary, startedAt))
+                appendLine()
+                appendLine("DRIVE UPLOAD")
+                result.uploadedFiles.forEach { appendLine("• $it") }
+                if (!checkpointSaved) {
+                    appendLine()
+                    appendLine("Upload succeeded, but the local checkpoint could not be saved.")
+                }
+            }
+            refreshPermissionState()
+            setBusy(false)
+        }.onFailure { error ->
+            pendingExport = file
+            pendingCheckpoint = checkpoint
+            debugLog.add(
+                "Drive upload failed: ${error.javaClass.name}: ${error.message}",
+                SystemClock.elapsedRealtime() - startedAt,
+            )
+            statusText.text = "Drive upload failed — save manually"
+            detailsText.text = buildString {
+                append(buildExportSummary(summary, startedAt))
+                appendLine()
+                appendLine("DRIVE UPLOAD FAILED")
+                appendLine(error.message ?: error.javaClass.simpleName)
+                appendLine()
+                appendLine("The export file was kept locally. Choose a save location to keep it.")
+                appendLine("Open Drive settings to reconnect, then retry sync.")
+            }
+            saveDocumentLauncher.launch(exportFileName(summary.syncMode))
+        }
+    }
+
+    private suspend fun requestDriveAuthorization(
+        request: IntentSenderRequest,
+    ): AuthorizationResult? = suspendCoroutine { continuation ->
+        pendingDriveAuthContinuation = { result -> continuation.resume(result) }
+        driveAuthLauncher.launch(request)
+    }
+
+    private fun persistCheckpoint(checkpoint: PendingCheckpoint): Boolean =
+        getSharedPreferences(syncPreferencesName, MODE_PRIVATE)
+            .edit()
+            .putString(changesTokenKey, checkpoint.changesToken)
+            .putString(lastSuccessfulExportKey, checkpoint.exportedAt.toString())
+            .commit()
+
+    private fun buildExportSummary(summary: EngineExportResult, startedAt: Long): String = buildString {
+        appendLine("EXPORT COMPLETE in ${elapsedText(startedAt)}")
+        appendLine("Mode: ${summary.syncMode} over ${summary.rangeCount} time ranges")
+        appendLine("Raw records: ${summary.rawRecordCount}")
+        appendLine("Compact summaries: ${summary.derivedRecordCount}")
+        appendLine("Non-empty types: ${summary.nonEmptyTypes}")
+        if (summary.warnings.isNotEmpty()) {
+            appendLine()
+            appendLine("WARNINGS (${summary.warnings.size})")
+            summary.warnings.forEach { warning ->
+                appendLine("• $warning")
+                debugLog.add("Warning: $warning")
             }
         }
     }

@@ -42,13 +42,13 @@ Raw source data should remain immutable. Normalized datasets are derived views a
 5. **Sync** raw and normalized data to private user-controlled storage.
 6. **Analyze** history, trends, workload, recovery, sleep, activity, and any other available signals.
 
-## Android exporter 0.3.4
+## Android exporter 0.4.0
 
 The default export is a compact, gzip-compressed synchronization stream:
 
 - The first successful sync covers all readable history.
 - Later syncs use a Health Connect changes token and export only affected dates, updates, and deletion identifiers.
-- The checkpoint is stored on-device only after the user successfully saves the file, preventing gaps after a cancelled or failed save.
+- The checkpoint is stored on-device only after a successful save or Drive upload, preventing gaps after a cancelled or failed transfer.
 - If a changes token expires, the app performs a bounded recovery from the previous successful export instead of silently skipping data.
 - Heart rate is retained only when associated with an exercise or sleep session.
 - Steps are represented as one deduplicated Health Connect total and one OHealth total per day.
@@ -57,6 +57,18 @@ The default export is a compact, gzip-compressed synchronization stream:
 - A manual full raw diagnostic export remains available for discovery and completeness checks.
 - The initial history floor is 2025-04-01, matching the known beginning of this OHealth dataset and avoiding empty queries back to 1970.
 - Compact sync skips the 41-type discovery probe; probing remains available only in the full raw diagnostic export.
+
+### Google Drive auto-upload
+
+After each compact sync, the app can upload three artifacts to a Drive folder tree it creates and owns (`drive.file` scope):
+
+- **Archive/** — raw `.ndjson.gz` export (full data backup)
+- **Reports/** — dated Markdown report and CSV metrics table for ChatGPT
+- **Reports/** — rolling `ohealth-latest-report.md` and `ohealth-latest-metrics.csv` updated on every sync
+
+Configure OAuth and folder naming in **Drive upload settings**. See [docs/GOOGLE_DRIVE_SETUP.md](docs/GOOGLE_DRIVE_SETUP.md) for Google Cloud setup, SHA-1 registration, and ChatGPT connector instructions.
+
+When auto-upload is enabled, the sync checkpoint is saved only after a successful Drive upload. If upload fails, open Drive settings to reconnect or disable auto-upload and save the export manually.
 
 Exports use schema version 3 and the `.ndjson.gz` format. Incremental consumers should upsert records by Health Connect record ID, replace derived daily rows by date, and apply emitted deletion identifiers.
 
