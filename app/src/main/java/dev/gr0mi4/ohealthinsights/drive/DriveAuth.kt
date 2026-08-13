@@ -25,7 +25,7 @@ class DriveAuth(private val activity: Activity) {
         require(isConfigured) {
             "Drive OAuth client ID is not configured. Add DRIVE_OAUTH_CLIENT_ID to local.properties."
         }
-        val initial = authorizationClient.authorize(buildRequest(forceConsent = true)).await()
+        val initial = authorizationClient.authorize(buildRequest()).await()
         if (!initial.hasResolution()) return initial
         error("Interactive authorization must be launched from the hosting activity.")
     }
@@ -35,23 +35,10 @@ class DriveAuth(private val activity: Activity) {
 
     fun extractAccountEmail(result: AuthorizationResult): String? = result.toGoogleSignInAccount()?.email
 
-    suspend fun revokeAccess() {
-        if (!isConfigured) return
-        runCatching {
-            authorizationClient.revokeAccess(
-                com.google.android.gms.auth.api.identity.RevokeAccessRequest.builder().build(),
-            ).await()
-        }
-    }
-
-    private fun buildRequest(forceConsent: Boolean = false): AuthorizationRequest {
-        val builder = AuthorizationRequest.builder()
+    private fun buildRequest(): AuthorizationRequest =
+        AuthorizationRequest.builder()
             .setRequestedScopes(listOf(Scope(DRIVE_FILE_SCOPE)))
-        if (forceConsent) {
-            builder.setPrompt(AuthorizationRequest.Prompt.CONSENT)
-        }
-        return builder.build()
-    }
+            .build()
 
     companion object {
         const val DRIVE_FILE_SCOPE = "https://www.googleapis.com/auth/drive.file"

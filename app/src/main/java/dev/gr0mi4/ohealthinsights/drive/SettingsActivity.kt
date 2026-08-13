@@ -196,7 +196,6 @@ class SettingsActivity : ComponentActivity() {
             runCatching {
                 val request = AuthorizationRequest.builder()
                     .setRequestedScopes(listOf(Scope(DriveAuth.DRIVE_FILE_SCOPE)))
-                    .setPrompt(AuthorizationRequest.Prompt.CONSENT)
                     .build()
                 val initial = authorizationClient.authorize(request).await()
                 if (initial.hasResolution()) {
@@ -239,17 +238,10 @@ class SettingsActivity : ComponentActivity() {
     }
 
     private fun disconnectAccount() {
-        lifecycleScope.launch {
-            runCatching {
-                authorizationClient.revokeAccess(
-                    com.google.android.gms.auth.api.identity.RevokeAccessRequest.builder().build(),
-                ).await()
-            }
-            settingsStore.clearAccount()
-            settingsStore.save(currentSettings().copy(googleAccountEmail = null))
-            statusText.text = "Disconnected."
-            Toast.makeText(this@SettingsActivity, "Google account disconnected", Toast.LENGTH_SHORT).show()
-        }
+        settingsStore.clearAccount()
+        settingsStore.save(currentSettings().copy(googleAccountEmail = null))
+        statusText.text = "Disconnected locally. Reconnect anytime from this screen."
+        Toast.makeText(this, "Google account disconnected", Toast.LENGTH_SHORT).show()
     }
 
     private suspend fun authorizeForUpload(): String? {
