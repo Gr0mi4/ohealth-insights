@@ -80,7 +80,7 @@ class DriveUploader(
         launchAuth: (suspend (IntentSenderRequest) -> AuthorizationResult?)?,
     ): String? {
         val request = AuthorizationRequest.builder()
-            .setRequestedScopes(listOf(Scope(DriveAuth.DRIVE_FILE_SCOPE)))
+            .setRequestedScopes(listOf(Scope(DriveScopes.DRIVE_FILE)))
             .build()
         val initial = authorizationClient.authorize(request).await()
         val result = when {

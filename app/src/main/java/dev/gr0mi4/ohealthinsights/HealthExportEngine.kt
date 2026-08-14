@@ -279,20 +279,35 @@ class HealthExportEngine(
             )
         }
 
+        // A type that dies mid-pagination leaves a hole in this export. Advancing the cursor would
+        // hide that hole forever, because the next incremental sync only revisits records that
+        // change from now on, and the skipped ones never will. Dropping the token instead routes the
+        // next run through overlap recovery, which re-reads the range and picks up a fresh cursor.
+        val heldBack = !diagnostic && states.values.any { it.error != null }
+
         EngineExportResult(
             rawRecordCount = states.values.sumOf { it.count },
             derivedRecordCount = derivedCount,
             nonEmptyTypes = states.values.count { it.count > 0 },
             syncMode = plan.mode.wireName,
             rangeCount = plan.ranges.size,
-            checkpointToken = if (diagnostic) null else plan.nextChangesToken,
-            checkpointTime = if (diagnostic) null else exportedAt,
+            checkpointToken = if (diagnostic || heldBack) null else plan.nextChangesToken,
+            checkpointTime = when {
+                diagnostic -> null
+                heldBack -> previousSuccessfulExport
+                else -> exportedAt
+            },
+            checkpointHeldBack = heldBack,
             warnings = buildList {
                 states.forEach { (recordType, state) ->
                     state.error?.let { add("$recordType: ${it.message ?: it.javaClass.simpleName}") }
                 }
-                if (!diagnostic && plan.nextChangesToken == null) {
-                    add("Incremental cursor unavailable; the next sync will use a $fallbackOverlapDays-day overlap.")
+                when {
+                    heldBack ->
+                        add("Checkpoint held back after a read failure; the next sync re-reads this range.")
+
+                    !diagnostic && plan.nextChangesToken == null ->
+                        add("Incremental cursor unavailable; the next sync will use a $fallbackOverlapDays-day overlap.")
                 }
                 slowStages.maxByOrNull { it.durationMillis }?.let { timing ->
                     add("Slowest stage: ${timing.stage} (${timing.durationMillis / 1_000}s)")
@@ -360,12 +375,13 @@ class HealthExportEngine(
             throw error
         } catch (error: Throwable) {
             onProgress("Warning: change cursor failed (${error.message}); using overlap recovery")
-            return SyncPlan(
-                mode = SyncMode.RECOVERY_COMPACT,
-                ranges = chunkRange(
-                    TimeWindow(fallbackRecoveryStart(previousSuccessfulExport, historyStart), end),
-                ),
-                nextChangesToken = previousChangesToken,
+            // Ask for a new cursor rather than storing the one that just failed: keeping it would
+            // make every future sync fail here too and re-run this recovery forever.
+            return recoveryPlan(
+                permittedTypes = permittedTypes,
+                previousSuccessfulExport = previousSuccessfulExport,
+                historyStart = historyStart,
+                end = end,
             )
         }
 
@@ -612,7 +628,13 @@ class HealthExportEngine(
             onRecord = { record ->
                 if (record is SleepSessionRecord) {
                     sleeps += TimeWindow(record.startTime, record.endTime)
-                    reportCollector?.onSleepSession(record.startTime, record.endTime)
+                    // Keyed by record id: a session on a chunk boundary is read by both ranges, and
+                    // the collector has to treat the second sighting as the same night.
+                    reportCollector?.onSleepSession(
+                        sessionId = record.metadata.id,
+                        startTime = record.startTime,
+                        endTime = record.endTime,
+                    )
                 }
             },
         )
@@ -895,7 +917,6 @@ class HealthExportEngine(
                         state.count += 1
                     }
                 }
-                writer.flush()
                 pageToken = response.pageToken
                 page += 1
             } while (pageToken != null)
@@ -1029,18 +1050,32 @@ class HealthExportEngine(
     /**
      * Deduplicates record ids without growing forever: duplicates only ever come from adjacent or
      * overlapping windows, so evicting the oldest ids is safe.
+     *
+     * Stores a 64-bit digest rather than the id itself, which costs roughly half the memory of
+     * retaining UUID strings and buys a correspondingly larger window before eviction starts. Two
+     * distinct ids colliding would drop one record; at this capacity the birthday bound puts that
+     * below one in ten million, well under the duplicate rate the string version produced once
+     * eviction kicked in.
      */
     private class BoundedIdSet(private val maxSize: Int) {
-        private val ids = LinkedHashSet<String>()
+        private val digests = LinkedHashSet<Long>()
 
         fun add(id: String): Boolean {
-            if (!ids.add(id)) return false
-            if (ids.size > maxSize) {
-                val iterator = ids.iterator()
+            if (!digests.add(digest(id))) return false
+            if (digests.size > maxSize) {
+                val iterator = digests.iterator()
                 iterator.next()
                 iterator.remove()
             }
             return true
+        }
+
+        private fun digest(value: String): Long {
+            var hash = -3750763034362895579L // FNV-1a 64-bit offset basis
+            for (index in value.indices) {
+                hash = (hash xor value[index].code.toLong()) * 1099511628211L
+            }
+            return hash
         }
     }
 
@@ -1110,7 +1145,7 @@ class HealthExportEngine(
         private const val dailyAggregationChunkDays = 45L
         private const val windowLookbackMinutes = 60L
         private const val fallbackOverlapDays = 7L
-        private const val maxTrackedRecordIds = 250_000
+        private const val maxTrackedRecordIds = 400_000
         private const val maxChangesPages = 200
         private const val maxAffectedDaysPerRecord = 400
         private const val maxSlowStages = 40
@@ -1199,6 +1234,8 @@ data class EngineExportResult(
     val rangeCount: Int,
     val checkpointToken: String?,
     val checkpointTime: Instant?,
+    /** True when a read failure forced the sync to keep its previous position. */
+    val checkpointHeldBack: Boolean,
     val warnings: List<String>,
 )
 

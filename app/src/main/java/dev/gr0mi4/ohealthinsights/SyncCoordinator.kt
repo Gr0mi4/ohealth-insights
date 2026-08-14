@@ -13,6 +13,8 @@ import dev.gr0mi4.ohealthinsights.drive.ReportCollector
 import java.io.File
 import java.time.Instant
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /**
  * Runs a full sync: export, optional Drive upload, checkpoint advance.
@@ -35,7 +37,35 @@ class SyncCoordinator(context: Context) {
     fun canAutoUpload(diagnostic: Boolean): Boolean =
         driveUploader.canAutoUpload(driveSettingsStore.load(), diagnostic)
 
+    /** Waits for any sync already in flight, then runs. Used by the manual button. */
     suspend fun run(
+        client: HealthConnectClient,
+        diagnostic: Boolean,
+        onStage: (String) -> Unit,
+        launchAuth: (suspend (IntentSenderRequest) -> AuthorizationResult?)?,
+    ): SyncOutcome = syncMutex.withLock {
+        execute(client, diagnostic, onStage, launchAuth)
+    }
+
+    /**
+     * Runs only if nothing else is syncing, otherwise returns null. The background worker uses this
+     * so it never races the screen the user is looking at.
+     */
+    suspend fun runIfIdle(
+        client: HealthConnectClient,
+        diagnostic: Boolean,
+        onStage: (String) -> Unit,
+        launchAuth: (suspend (IntentSenderRequest) -> AuthorizationResult?)?,
+    ): SyncOutcome? {
+        if (!syncMutex.tryLock()) return null
+        return try {
+            execute(client, diagnostic, onStage, launchAuth)
+        } finally {
+            syncMutex.unlock()
+        }
+    }
+
+    private suspend fun execute(
         client: HealthConnectClient,
         diagnostic: Boolean,
         onStage: (String) -> Unit,
@@ -60,6 +90,9 @@ class SyncCoordinator(context: Context) {
             if (error is CancellationException) throw error
             return SyncOutcome.ExportFailed(error)
         }
+
+        // One write for the whole export; the reports below read the file back.
+        reportCollector?.flush()
 
         val checkpoint = summary.checkpointTime?.let { SyncCheckpoint(summary.checkpointToken, it) }
         if (!autoUpload) return SyncOutcome.ReadyToSave(summary, file, checkpoint)
@@ -96,6 +129,14 @@ class SyncCoordinator(context: Context) {
     }
 
     fun persistCheckpoint(checkpoint: SyncCheckpoint): Boolean = syncState.persistCheckpoint(checkpoint)
+
+    private companion object {
+        /**
+         * The worker and the activity share a process, so one lock is enough to keep two syncs off
+         * the same checkpoint, metrics file and Drive folder.
+         */
+        val syncMutex = Mutex()
+    }
 }
 
 sealed interface SyncOutcome {

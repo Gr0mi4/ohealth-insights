@@ -42,14 +42,15 @@ Raw source data should remain immutable. Normalized datasets are derived views a
 5. **Sync** raw and normalized data to private user-controlled storage.
 6. **Analyze** history, trends, workload, recovery, sleep, activity, and any other available signals.
 
-## Android exporter 0.5.0
+## Android exporter 0.6.0
 
 The default export is a compact, gzip-compressed synchronization stream:
 
 - The first successful sync covers all readable history.
 - Later syncs use a Health Connect changes token and export only affected dates, updates, and deletion identifiers.
 - The checkpoint is stored on-device only after a successful save or Drive upload, preventing gaps after a cancelled or failed transfer.
-- If a changes token expires, the app performs a bounded recovery from the previous successful export instead of silently skipping data.
+- If a record type fails part-way through its pages, the checkpoint is held at its previous position and the cursor is dropped, so the next sync re-reads the range through overlap recovery instead of stepping over the missing pages forever.
+- If a changes token expires or the change cursor itself fails, the app requests a fresh cursor and performs a bounded recovery from the previous successful export. A cursor that fails is never stored again, which is what previously turned one bad token into a permanent recovery loop.
 - Heart rate is retained only when associated with an exercise or sleep session.
 - Steps are represented as one deduplicated Health Connect total and one OHealth total per day.
 - Total calories are represented per day and per exercise session.
@@ -63,7 +64,7 @@ The default export is a compact, gzip-compressed synchronization stream:
 
 Drive authorization is persisted independently from the optional Google account email. This
 prevents a successful Drive-only OAuth grant from appearing disconnected after the settings
-screen is reopened. The launcher icon carries the installed `0.5.0` version badge.
+screen is reopened. The launcher icon carries the installed `0.6.0` version badge.
 
 After each compact sync, the app can upload three artifacts to a Drive folder tree it creates and owns (`drive.file` scope):
 
@@ -73,6 +74,23 @@ After each compact sync, the app can upload three artifacts to a Drive folder tr
 
 **Test connection** provisions the whole folder tree and writes `ohealth-connection-test.txt` into the
 root folder, so a passing test proves upload access rather than folder-creation access alone.
+
+Drive permits several files to share a name in one folder, so every report and CSV is written by name:
+a second sync on the same day replaces that day's file instead of adding a second copy next to it.
+`Archive/` keeps the 60 most recent raw exports and drops older ones, since the reports are derived
+from the on-device metrics rather than from the archives.
+
+### Reported metrics
+
+Daily steps and calories come from Health Connect aggregates and are overwritten on every sync.
+Workouts and sleep are tracked per session id rather than as running totals, so re-reading a day —
+after a retry, an overlap recovery, or a session that straddles two 30-day ranges — leaves the numbers
+unchanged. Before 0.6.0 each replay added to them, which inflated workout counts and sleep minutes in
+the report and CSV.
+
+Upgrading to 0.6.0 keeps historical steps and calories and resets workout and sleep figures, which
+show as `—` until the next sync covers those days again. The old file stored totals without session
+ids, so there is nothing to recompute them from.
 
 ### Daily automatic sync
 
@@ -84,8 +102,13 @@ The first full history export always stays manual: it can exceed the ten minutes
 background worker. Automatic runs only ever take the incremental path.
 
 Failures retry with exponential backoff and never advance the checkpoint, so a failed run re-exports
-the same range rather than losing data. Success is silent; a notification appears only after repeated
+the same range rather than losing data. A run that uploads successfully but could not move the
+checkpoint forward is treated the same way, because otherwise a daily sync could report success
+indefinitely while standing still. Success is silent; a notification appears only after repeated
 failures or when Drive access has to be granted again.
+
+A background run skips itself while the app is syncing in the foreground, so the two never write the
+same checkpoint, metrics file, or Drive folder at once.
 
 Configure OAuth and folder naming in **Drive upload settings**. See [docs/GOOGLE_DRIVE_SETUP.md](docs/GOOGLE_DRIVE_SETUP.md) for Google Cloud setup, SHA-1 registration, and ChatGPT connector instructions.
 
@@ -101,7 +124,7 @@ sync is now bounded on four axes:
 - Work is split into 30-day ranges. Each range is a visible progress step and produces its own `range_summary` record.
 - Heart rate, oxygen saturation, and respiratory rate are read **inside merged workout and sleep windows only**, instead of reading a continuous series across the whole range and discarding most of it.
 - Daily aggregation is chunked into 45-day requests, keeping every request well below Health Connect's 5,000-group limit.
-- Record-id deduplication uses a bounded cache, the change cursor stops after 200 pages, and each Health Connect call is capped at 60 seconds.
+- Record-id deduplication uses a bounded cache of 64-bit digests rather than the id strings themselves, which covers 400,000 records for roughly half the memory the strings needed. The change cursor stops after 200 pages, and each Health Connect call is capped at 60 seconds.
 
 ### Debugging an export
 

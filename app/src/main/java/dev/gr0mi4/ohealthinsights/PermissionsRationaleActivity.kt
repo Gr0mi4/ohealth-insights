@@ -15,11 +15,13 @@ class PermissionsRationaleActivity : Activity() {
             text = """
                 OHealth Insights reads health and fitness records only after you approve the requested Health Connect permissions.
 
-                The app creates compressed full or incremental exports in a file location that you choose. It does not upload health data and does not request internet access.
+                The app creates compressed full or incremental exports and saves them to a file location that you choose.
 
-                A local sync checkpoint is advanced only after you save an export successfully.
+                If you turn on Google Drive upload, those exports and the reports derived from them are sent to your own Google Drive account. The app asks only for access to the files it creates there, and it sends your health data to no other destination.
 
-                You can revoke access at any time in Health Connect settings.
+                A local sync checkpoint is advanced only after an export has been saved or uploaded successfully.
+
+                You can revoke Health Connect access at any time in Health Connect settings, and Drive access at any time in your Google account.
             """.trimIndent()
             textSize = 18f
         }

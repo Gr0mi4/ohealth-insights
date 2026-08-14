@@ -1,6 +1,7 @@
 package dev.gr0mi4.ohealthinsights
 
 import android.content.Context
+import android.util.Log
 import androidx.health.connect.client.HealthConnectClient
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
@@ -17,19 +18,32 @@ class AutoSyncWorker(
 
     override suspend fun doWork(): Result {
         val context = applicationContext
-        if (blockingPrecondition(context) != null) return Result.success()
+        blockingPrecondition(context)?.let { reason ->
+            Log.i(LOG_TAG, "Skipping automatic sync: $reason")
+            return Result.success()
+        }
 
-        val outcome = SyncCoordinator(context).run(
+        val outcome = SyncCoordinator(context).runIfIdle(
             client = HealthConnectClient.getOrCreate(context),
             diagnostic = false,
             onStage = {},
             launchAuth = null,
-        )
+        ) ?: return Result.retry() // The app is syncing right now; try again later.
 
         return when (outcome) {
-            is SyncOutcome.Uploaded -> {
-                SyncNotifications.clearAll(context)
-                Result.success()
+            is SyncOutcome.Uploaded -> when {
+                outcome.summary.checkpointHeldBack ->
+                    // The upload worked but the sync did not move forward, so tomorrow repeats
+                    // today. Harmless once or twice, worth reporting if it persists.
+                    retryOrReport(context, outcome.summary.warnings.firstOrNull() ?: "A record type could not be read")
+
+                !outcome.checkpointSaved ->
+                    retryOrReport(context, "The sync checkpoint could not be saved")
+
+                else -> {
+                    SyncNotifications.clearAll(context)
+                    Result.success()
+                }
             }
 
             is SyncOutcome.UploadFailed -> {
@@ -48,14 +62,17 @@ class AutoSyncWorker(
                 retryOrReport(context, outcome.error.message ?: outcome.error.javaClass.simpleName)
 
             is SyncOutcome.ReadyToSave -> {
+                // Unreachable while the preconditions below hold. If it does happen, the export has
+                // nowhere to go and staying quiet would look like a working daily sync.
                 outcome.file.delete()
-                Result.success()
+                SyncNotifications.notifyRepeatedFailure(context, "Automatic upload is not available for this build.")
+                Result.failure()
             }
         }
     }
 
     private fun retryOrReport(context: Context, reason: String): Result =
-        if (runAttemptCount + 1 < maxAttempts) {
+        if (runAttemptCount + 1 < MAX_ATTEMPTS) {
             Result.retry()
         } else {
             SyncNotifications.notifyRepeatedFailure(context, reason)
@@ -67,7 +84,12 @@ class AutoSyncWorker(
         if (HealthConnectClient.getSdkStatus(context) != HealthConnectClient.SDK_AVAILABLE) {
             return "Health Connect is unavailable"
         }
-        val settings = DriveSettingsStore(context).load()
+        val settingsStore = DriveSettingsStore(context)
+        // Without a client ID the upload can never start, and the export would be built and thrown
+        // away on every run.
+        if (!settingsStore.isConfigured()) return "This build has no Drive OAuth client ID"
+
+        val settings = settingsStore.load()
         if (!settings.autoSyncEnabled) return "Automatic sync is disabled"
         if (!settings.autoUploadEnabled) return "Drive auto-upload is disabled"
         if (!settings.driveAuthorizationGranted) return "Drive is not authorized"
@@ -83,6 +105,7 @@ class AutoSyncWorker(
     }
 
     private companion object {
-        const val maxAttempts = 3
+        const val MAX_ATTEMPTS = 3
+        const val LOG_TAG = "AutoSyncWorker"
     }
 }

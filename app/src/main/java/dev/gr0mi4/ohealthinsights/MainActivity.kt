@@ -36,6 +36,7 @@ import java.time.LocalDate
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import java.util.concurrent.atomic.AtomicReference
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -109,13 +110,17 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch {
             val result = runCatching {
                 withContext(Dispatchers.IO) {
-                    contentResolver.openOutputStream(destination, "w")!!.use { output ->
-                        source.inputStream().use { input -> input.copyTo(output) }
+                    val output = contentResolver.openOutputStream(destination, "w")
+                        ?: error("The selected location did not accept a file.")
+                    output.use { stream ->
+                        source.inputStream().use { input -> input.copyTo(stream) }
                     }
                     source.delete()
                     checkpoint?.let(syncState::persistCheckpoint) ?: true
                 }
             }
+            // A cancelled scope means the screen is going away, not that the save failed.
+            result.exceptionOrNull()?.let { if (it is CancellationException) throw it }
 
             result.onSuccess { checkpointSaved ->
                 debugLog.add("Export saved; checkpoint persisted: $checkpointSaved")

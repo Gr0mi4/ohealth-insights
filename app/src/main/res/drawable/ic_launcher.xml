@@ -35,10 +35,10 @@
         android:fillColor="#FFFFFF"
         android:pathData="M33,88H37V92H33Z" />
 
-    <!-- 5 -->
+    <!-- 6 -->
     <path
         android:fillColor="#FFFFFF"
-        android:pathData="M41,70H53V73H41ZM41,73H44V82H41ZM41,80H53V84H41ZM50,82H53V89H50ZM41,89H53V92H41Z" />
+        android:pathData="M41,70H53V73H41ZM41,73H44V89H41ZM41,80H53V84H41ZM50,82H53V89H50ZM41,89H53V92H41Z" />
 
     <!-- . -->
     <path

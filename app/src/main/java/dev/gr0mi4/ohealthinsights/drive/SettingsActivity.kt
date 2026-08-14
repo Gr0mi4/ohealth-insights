@@ -236,7 +236,7 @@ class SettingsActivity : ComponentActivity() {
             statusText.text = "Opening Google sign-in…"
             runCatching {
                 val request = AuthorizationRequest.builder()
-                    .setRequestedScopes(listOf(Scope(DriveAuth.DRIVE_FILE_SCOPE)))
+                    .setRequestedScopes(listOf(Scope(DriveScopes.DRIVE_FILE)))
                     .build()
                 val initial = authorizationClient.authorize(request).await()
                 if (initial.hasResolution()) {
@@ -306,7 +306,7 @@ class SettingsActivity : ComponentActivity() {
 
     private suspend fun authorizeForUpload(): String? {
         val request = AuthorizationRequest.builder()
-            .setRequestedScopes(listOf(Scope(DriveAuth.DRIVE_FILE_SCOPE)))
+            .setRequestedScopes(listOf(Scope(DriveScopes.DRIVE_FILE)))
             .build()
         val result = authorizationClient.authorize(request).await()
         if (result.hasResolution()) return null
