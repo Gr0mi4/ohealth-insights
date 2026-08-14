@@ -1,0 +1,126 @@
+package dev.gr0mi4.ohealthinsights
+
+import android.content.Context
+import androidx.activity.result.IntentSenderRequest
+import androidx.health.connect.client.HealthConnectClient
+import com.google.android.gms.auth.api.identity.AuthorizationResult
+import dev.gr0mi4.ohealthinsights.drive.DriveAuthorizationRequired
+import dev.gr0mi4.ohealthinsights.drive.DriveSettingsStore
+import dev.gr0mi4.ohealthinsights.drive.DriveUploader
+import dev.gr0mi4.ohealthinsights.drive.MetricsStore
+import dev.gr0mi4.ohealthinsights.drive.ReportBuilder
+import dev.gr0mi4.ohealthinsights.drive.ReportCollector
+import java.io.File
+import java.time.Instant
+import kotlinx.coroutines.CancellationException
+
+/**
+ * Runs a full sync: export, optional Drive upload, checkpoint advance.
+ *
+ * Holds no reference to a UI, so the same code path serves the manual button and the background
+ * worker. The caller decides what to do with a [SyncOutcome]; the coordinator only guarantees that
+ * the checkpoint advances after a successful upload and never before.
+ */
+class SyncCoordinator(context: Context) {
+    private val appContext = context.applicationContext
+    private val syncState = SyncStateStore(appContext)
+    private val driveSettingsStore = DriveSettingsStore(appContext)
+    private val metricsStore = MetricsStore(appContext)
+    private val driveUploader = DriveUploader(
+        appContext,
+        driveSettingsStore,
+        ReportBuilder(metricsStore),
+    )
+
+    fun canAutoUpload(diagnostic: Boolean): Boolean =
+        driveUploader.canAutoUpload(driveSettingsStore.load(), diagnostic)
+
+    suspend fun run(
+        client: HealthConnectClient,
+        diagnostic: Boolean,
+        onStage: (String) -> Unit,
+        launchAuth: (suspend (IntentSenderRequest) -> AuthorizationResult?)?,
+    ): SyncOutcome {
+        val file = File(appContext.cacheDir, "ohealth-insights-${System.currentTimeMillis()}.ndjson.gz")
+        val exportedAt = Instant.now()
+        val autoUpload = canAutoUpload(diagnostic)
+        val reportCollector = if (autoUpload || !diagnostic) ReportCollector(metricsStore) else null
+
+        val summary = runCatching {
+            HealthExportEngine(client, onStage).export(
+                destination = file,
+                previousChangesToken = if (diagnostic) null else syncState.changesToken(),
+                previousSuccessfulExport = if (diagnostic) null else syncState.lastSuccessfulExport(),
+                diagnostic = diagnostic,
+                reportCollector = reportCollector,
+                requestedHistoryStartDate = syncState.historyStartDate(),
+            )
+        }.getOrElse { error ->
+            file.delete()
+            if (error is CancellationException) throw error
+            return SyncOutcome.ExportFailed(error)
+        }
+
+        val checkpoint = summary.checkpointTime?.let { SyncCheckpoint(summary.checkpointToken, it) }
+        if (!autoUpload) return SyncOutcome.ReadyToSave(summary, file, checkpoint)
+
+        return runCatching {
+            driveUploader.uploadAfterSync(
+                rawFile = file,
+                summary = summary,
+                exportedAt = exportedAt,
+                sessionWorkouts = reportCollector?.sessionWorkouts().orEmpty(),
+                onProgress = onStage,
+                launchAuth = launchAuth,
+            )
+        }.fold(
+            onSuccess = { result ->
+                file.delete()
+                SyncOutcome.Uploaded(
+                    summary = summary,
+                    uploadedFiles = result.uploadedFiles,
+                    checkpointSaved = checkpoint?.let(syncState::persistCheckpoint) ?: true,
+                )
+            },
+            onFailure = { error ->
+                if (error is CancellationException) throw error
+                SyncOutcome.UploadFailed(
+                    summary = summary,
+                    file = file,
+                    checkpoint = checkpoint,
+                    error = error,
+                    needsAuthorization = error is DriveAuthorizationRequired,
+                )
+            },
+        )
+    }
+
+    fun persistCheckpoint(checkpoint: SyncCheckpoint): Boolean = syncState.persistCheckpoint(checkpoint)
+}
+
+sealed interface SyncOutcome {
+    /** Export and upload both succeeded; the temporary file is already gone. */
+    data class Uploaded(
+        val summary: EngineExportResult,
+        val uploadedFiles: List<String>,
+        val checkpointSaved: Boolean,
+    ) : SyncOutcome
+
+    /** Auto-upload is off or diagnostic mode is on; the caller owns [file] and the checkpoint. */
+    data class ReadyToSave(
+        val summary: EngineExportResult,
+        val file: File,
+        val checkpoint: SyncCheckpoint?,
+    ) : SyncOutcome
+
+    /** Export succeeded but the upload did not; [file] is kept so the caller can still save it. */
+    data class UploadFailed(
+        val summary: EngineExportResult,
+        val file: File,
+        val checkpoint: SyncCheckpoint?,
+        val error: Throwable,
+        val needsAuthorization: Boolean,
+    ) : SyncOutcome
+
+    data class ExportFailed(val error: Throwable) : SyncOutcome
+}
