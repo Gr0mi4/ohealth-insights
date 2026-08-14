@@ -42,7 +42,7 @@ Raw source data should remain immutable. Normalized datasets are derived views a
 5. **Sync** raw and normalized data to private user-controlled storage.
 6. **Analyze** history, trends, workload, recovery, sleep, activity, and any other available signals.
 
-## Android exporter 0.6.1
+## Android exporter 0.6.2
 
 The default export is a compact, gzip-compressed synchronization stream:
 
@@ -64,7 +64,13 @@ The default export is a compact, gzip-compressed synchronization stream:
 
 Drive authorization is persisted independently from the optional Google account email. This
 prevents a successful Drive-only OAuth grant from appearing disconnected after the settings
-screen is reopened. The launcher icon carries the installed `0.6.1` version badge.
+screen is reopened. The launcher icon carries the installed `0.6.2` version badge.
+
+The main screen and Drive settings show the last successfully completed Drive bundle write. The
+timestamp is persisted only after every file in the bundle has received a successful Drive API
+response, so a scheduled attempt, connection test, partial upload, or failed upload cannot move it.
+The same record includes whether the trigger was manual or automatic, the sync mode, file count, and
+app version in the copied diagnostics log.
 
 After each compact sync, the app can upload three artifacts to a Drive folder tree it creates and owns (`drive.file` scope):
 

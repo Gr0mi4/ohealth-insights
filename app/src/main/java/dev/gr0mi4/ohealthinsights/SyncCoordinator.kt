@@ -44,7 +44,7 @@ class SyncCoordinator(context: Context) {
         onStage: (String) -> Unit,
         launchAuth: (suspend (IntentSenderRequest) -> AuthorizationResult?)?,
     ): SyncOutcome = syncMutex.withLock {
-        execute(client, diagnostic, onStage, launchAuth)
+        execute(client, diagnostic, SyncTrigger.MANUAL, onStage, launchAuth)
     }
 
     /**
@@ -59,7 +59,7 @@ class SyncCoordinator(context: Context) {
     ): SyncOutcome? {
         if (!syncMutex.tryLock()) return null
         return try {
-            execute(client, diagnostic, onStage, launchAuth)
+            execute(client, diagnostic, SyncTrigger.AUTOMATIC, onStage, launchAuth)
         } finally {
             syncMutex.unlock()
         }
@@ -68,6 +68,7 @@ class SyncCoordinator(context: Context) {
     private suspend fun execute(
         client: HealthConnectClient,
         diagnostic: Boolean,
+        trigger: SyncTrigger,
         onStage: (String) -> Unit,
         launchAuth: (suspend (IntentSenderRequest) -> AuthorizationResult?)?,
     ): SyncOutcome {
@@ -102,6 +103,7 @@ class SyncCoordinator(context: Context) {
                 rawFile = file,
                 summary = summary,
                 exportedAt = exportedAt,
+                trigger = trigger,
                 sessionWorkouts = reportCollector?.sessionWorkouts().orEmpty(),
                 onProgress = onStage,
                 launchAuth = launchAuth,
@@ -137,6 +139,11 @@ class SyncCoordinator(context: Context) {
          */
         val syncMutex = Mutex()
     }
+}
+
+enum class SyncTrigger(val diagnosticLabel: String) {
+    MANUAL("manual"),
+    AUTOMATIC("automatic"),
 }
 
 sealed interface SyncOutcome {

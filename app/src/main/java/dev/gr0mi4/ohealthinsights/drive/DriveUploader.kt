@@ -8,6 +8,7 @@ import com.google.android.gms.auth.api.identity.Identity
 import com.google.android.gms.common.api.Scope
 import dev.gr0mi4.ohealthinsights.BuildConfig
 import dev.gr0mi4.ohealthinsights.EngineExportResult
+import dev.gr0mi4.ohealthinsights.SyncTrigger
 import java.io.File
 import java.time.Instant
 import kotlinx.coroutines.Dispatchers
@@ -39,6 +40,7 @@ class DriveUploader(
         rawFile: File,
         summary: EngineExportResult,
         exportedAt: Instant,
+        trigger: SyncTrigger,
         sessionWorkouts: List<WorkoutMetric>,
         onProgress: (String) -> Unit,
         launchAuth: (suspend (IntentSenderRequest) -> AuthorizationResult?)?,
@@ -72,6 +74,12 @@ class DriveUploader(
             settingsStore.updateLatestFileIds(
                 reportFileId = result.latestReportFileId,
                 csvFileId = result.latestCsvFileId,
+            )
+            settingsStore.recordSuccessfulUpload(
+                completedAt = Instant.now(),
+                trigger = trigger.diagnosticLabel,
+                syncMode = summary.syncMode,
+                uploadedFileCount = result.uploadedFiles.size,
             )
         }
     }

@@ -21,6 +21,7 @@ import com.google.android.gms.auth.api.identity.Identity
 import com.google.android.gms.common.api.Scope
 import dev.gr0mi4.ohealthinsights.AutoSyncScheduler
 import dev.gr0mi4.ohealthinsights.SyncNotifications
+import dev.gr0mi4.ohealthinsights.formatDriveSyncDebug
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
@@ -29,6 +30,7 @@ import kotlinx.coroutines.withContext
 class SettingsActivity : ComponentActivity() {
     private lateinit var settingsStore: DriveSettingsStore
     private lateinit var statusText: TextView
+    private lateinit var lastUploadText: TextView
     private lateinit var autoUploadCheck: CheckBox
     private lateinit var autoSyncCheck: CheckBox
     private lateinit var updateLatestCheck: CheckBox
@@ -85,6 +87,10 @@ class SettingsActivity : ComponentActivity() {
         val padding = (16 * density).toInt()
 
         statusText = TextView(this).apply { textSize = 15f }
+        lastUploadText = TextView(this).apply {
+            textSize = 13f
+            setTextIsSelectable(true)
+        }
         autoUploadCheck = CheckBox(this).apply { text = "Auto-upload after sync" }
         autoSyncCheck = CheckBox(this).apply {
             text = "Sync automatically once a day"
@@ -138,6 +144,7 @@ class SettingsActivity : ComponentActivity() {
                 gravity = Gravity.CENTER_HORIZONTAL
             })
             addView(statusText, wrap(top = 8))
+            addView(lastUploadText, wrap(top = 8))
             addView(autoUploadCheck, wrap(top = 12))
             addView(autoSyncCheck, wrap(top = 4))
             addView(autoSyncHint, wrap(top = 2))
@@ -173,6 +180,7 @@ class SettingsActivity : ComponentActivity() {
     }
 
     private fun renderSettings(settings: DriveSettings) {
+        updateLastUploadText()
         if (!settingsStore.isConfigured()) {
             statusText.text = "Drive OAuth client ID is missing. See docs/GOOGLE_DRIVE_SETUP.md."
             return
@@ -193,6 +201,17 @@ class SettingsActivity : ComponentActivity() {
                 "Connected as ${settings.googleAccountEmail}"
             settings.driveAuthorizationGranted -> "Connected to Google Drive."
             else -> "Not connected. Tap Connect Google account."
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        updateLastUploadText()
+    }
+
+    private fun updateLastUploadText() {
+        if (::lastUploadText.isInitialized) {
+            lastUploadText.text = formatDriveSyncDebug(settingsStore.lastSuccessfulUpload())
         }
     }
 

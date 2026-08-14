@@ -3,6 +3,7 @@ package dev.gr0mi4.ohealthinsights.drive
 import android.content.Context
 import android.content.SharedPreferences
 import dev.gr0mi4.ohealthinsights.BuildConfig
+import java.time.Instant
 
 data class DriveSettings(
     val autoUploadEnabled: Boolean = false,
@@ -102,6 +103,36 @@ class DriveSettingsStore(context: Context) {
             .apply()
     }
 
+    /**
+     * Records a completed Drive bundle, never an upload attempt. This is committed synchronously so
+     * a background worker cannot report success and be stopped before the diagnostic state is saved.
+     */
+    fun recordSuccessfulUpload(
+        completedAt: Instant,
+        trigger: String,
+        syncMode: String,
+        uploadedFileCount: Int,
+    ): Boolean = prefs.edit()
+        .putString(KEY_LAST_SUCCESSFUL_UPLOAD_AT, completedAt.toString())
+        .putString(KEY_LAST_SUCCESSFUL_UPLOAD_TRIGGER, trigger)
+        .putString(KEY_LAST_SUCCESSFUL_UPLOAD_MODE, syncMode)
+        .putInt(KEY_LAST_SUCCESSFUL_UPLOAD_FILE_COUNT, uploadedFileCount)
+        .putString(KEY_LAST_SUCCESSFUL_UPLOAD_APP_VERSION, BuildConfig.VERSION_NAME)
+        .commit()
+
+    fun lastSuccessfulUpload(): DriveUploadStatus? {
+        val completedAt = prefs.getString(KEY_LAST_SUCCESSFUL_UPLOAD_AT, null)
+            ?.let { runCatching { Instant.parse(it) }.getOrNull() }
+            ?: return null
+        return DriveUploadStatus(
+            completedAt = completedAt,
+            trigger = prefs.getString(KEY_LAST_SUCCESSFUL_UPLOAD_TRIGGER, null),
+            syncMode = prefs.getString(KEY_LAST_SUCCESSFUL_UPLOAD_MODE, null),
+            uploadedFileCount = prefs.getInt(KEY_LAST_SUCCESSFUL_UPLOAD_FILE_COUNT, 0),
+            appVersion = prefs.getString(KEY_LAST_SUCCESSFUL_UPLOAD_APP_VERSION, null),
+        )
+    }
+
     fun clearAccount() {
         prefs.edit()
             .remove(KEY_ACCOUNT_EMAIL)
@@ -137,8 +168,21 @@ class DriveSettingsStore(context: Context) {
         private const val KEY_ARCHIVE_FOLDER_ID = "archive_folder_id"
         private const val KEY_LATEST_REPORT_ID = "latest_report_file_id"
         private const val KEY_LATEST_CSV_ID = "latest_csv_file_id"
+        private const val KEY_LAST_SUCCESSFUL_UPLOAD_AT = "last_successful_upload_at_v1"
+        private const val KEY_LAST_SUCCESSFUL_UPLOAD_TRIGGER = "last_successful_upload_trigger_v1"
+        private const val KEY_LAST_SUCCESSFUL_UPLOAD_MODE = "last_successful_upload_mode_v1"
+        private const val KEY_LAST_SUCCESSFUL_UPLOAD_FILE_COUNT = "last_successful_upload_file_count_v1"
+        private const val KEY_LAST_SUCCESSFUL_UPLOAD_APP_VERSION = "last_successful_upload_app_version_v1"
     }
 }
+
+data class DriveUploadStatus(
+    val completedAt: Instant,
+    val trigger: String?,
+    val syncMode: String?,
+    val uploadedFileCount: Int,
+    val appVersion: String?,
+)
 
 data class NamingContext(
     val syncMode: String,
