@@ -634,6 +634,7 @@ class HealthExportEngine(
                         sessionId = record.metadata.id,
                         startTime = record.startTime,
                         endTime = record.endTime,
+                        actualSleepMinutes = actualSleepMinutes(record),
                     )
                 }
             },
@@ -1036,6 +1037,25 @@ class HealthExportEngine(
             }
         }
         return merged
+    }
+
+    /**
+     * OHealth's UI subtracts awake stages from the session window. Health Connect sometimes omits
+     * stages entirely; in that case there is no honest way to reproduce OHealth's asleep duration,
+     * so the report leaves it unknown and exposes the full time-in-bed window separately.
+     */
+    private fun actualSleepMinutes(record: SleepSessionRecord): Long? {
+        val sleepingStages = record.stages.filter { stage ->
+            stage.stage == SleepSessionRecord.STAGE_TYPE_SLEEPING ||
+                stage.stage == SleepSessionRecord.STAGE_TYPE_LIGHT ||
+                stage.stage == SleepSessionRecord.STAGE_TYPE_DEEP ||
+                stage.stage == SleepSessionRecord.STAGE_TYPE_REM
+        }
+        if (sleepingStages.isEmpty()) return null
+        val seconds = sleepingStages.sumOf { stage ->
+            ChronoUnit.SECONDS.between(stage.startTime, stage.endTime).coerceAtLeast(0)
+        }
+        return seconds / 60
     }
 
     private fun rangeLabel(range: TimeWindow, zone: ZoneId): String {

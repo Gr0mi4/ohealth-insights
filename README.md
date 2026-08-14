@@ -42,7 +42,7 @@ Raw source data should remain immutable. Normalized datasets are derived views a
 5. **Sync** raw and normalized data to private user-controlled storage.
 6. **Analyze** history, trends, workload, recovery, sleep, activity, and any other available signals.
 
-## Android exporter 0.6.0
+## Android exporter 0.6.1
 
 The default export is a compact, gzip-compressed synchronization stream:
 
@@ -64,7 +64,7 @@ The default export is a compact, gzip-compressed synchronization stream:
 
 Drive authorization is persisted independently from the optional Google account email. This
 prevents a successful Drive-only OAuth grant from appearing disconnected after the settings
-screen is reopened. The launcher icon carries the installed `0.6.0` version badge.
+screen is reopened. The launcher icon carries the installed `0.6.1` version badge.
 
 After each compact sync, the app can upload three artifacts to a Drive folder tree it creates and owns (`drive.file` scope):
 
@@ -88,7 +88,17 @@ after a retry, an overlap recovery, or a session that straddles two 30-day range
 unchanged. Before 0.6.0 each replay added to them, which inflated workout counts and sleep minutes in
 the report and CSV.
 
-Upgrading to 0.6.0 keeps historical steps and calories and resets workout and sleep figures, which
+Short low-energy generic `Workout` sessions are retained in the raw stream but excluded from daily
+workout totals. A generic session within 30 minutes of a named workout is also treated as an
+auto-detected fragment. The Markdown report lists excluded sessions separately so the filtering is
+visible rather than destructive.
+
+Sleep reports distinguish actual asleep time from the full Health Connect session window. Actual
+sleep is the sum of sleeping, light, deep, and REM stages; awake and out-of-bed stages are excluded.
+When OHealth omits stages from Health Connect, actual sleep stays unknown and the report exposes the
+session as **Time in bed** instead of presenting it as measured sleep.
+
+Upgrading to 0.6.1 keeps historical steps and calories and resets workout and sleep figures, which
 show as `—` until the next sync covers those days again. The old file stored totals without session
 ids, so there is nothing to recompute them from.
 

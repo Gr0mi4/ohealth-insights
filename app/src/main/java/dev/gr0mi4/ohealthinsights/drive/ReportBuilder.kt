@@ -17,6 +17,8 @@ class ReportBuilder(
         reportDays: Int = 14,
     ): String {
         val recent = metricsStore.recentDays(reportDays)
+        val includedWorkouts = sessionWorkouts.filter { it.includedInTotals }
+        val excludedWorkouts = sessionWorkouts.filterNot { it.includedInTotals }
         val formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm 'UTC'").withZone(ZoneOffset.UTC)
         return buildString {
             appendLine("# OHealth Insights Report")
@@ -30,24 +32,40 @@ class ReportBuilder(
             appendLine()
             appendLine("## Last $reportDays days")
             appendLine()
-            appendLine("| Date | Steps (dedup) | Steps (OHealth) | Calories (kcal) | Workouts | Sleep (min) |")
-            appendLine("| --- | ---: | ---: | ---: | ---: | ---: |")
+            appendLine(
+                "| Date | Steps (dedup) | Steps (OHealth) | Calories (kcal) | " +
+                    "Workouts | Sleep (actual min) | Time in bed (min) |",
+            )
+            appendLine("| --- | ---: | ---: | ---: | ---: | ---: | ---: |")
             recent.forEach { day ->
                 appendLine(
                     "| ${day.date} | ${day.stepsTotal ?: "—"} | ${day.stepsOHealth ?: "—"} | " +
                         "${formatDouble(day.totalCaloriesKcal)} | ${day.workoutCount} | " +
-                        "${day.sleepMinutes ?: "—"} |",
+                        "${day.sleepMinutes ?: "—"} | ${day.timeInBedMinutes ?: "—"} |",
                 )
             }
-            if (sessionWorkouts.isNotEmpty()) {
+            if (includedWorkouts.isNotEmpty()) {
                 appendLine()
                 appendLine("## Workouts in this sync")
                 appendLine()
-                sessionWorkouts.forEach { workout ->
+                includedWorkouts.forEach { workout ->
                     appendLine(
                         "- ${workout.title ?: "Workout"}: " +
                             "${formatter.format(workout.startTime)} → ${formatter.format(workout.endTime)}, " +
                             "${formatDouble(workout.caloriesKcal)} kcal",
+                    )
+                }
+            }
+            if (excludedWorkouts.isNotEmpty()) {
+                appendLine()
+                appendLine("## Generic activity excluded from workout totals")
+                appendLine()
+                excludedWorkouts.forEach { workout ->
+                    appendLine(
+                        "- ${workout.title ?: "Workout"}: " +
+                            "${formatter.format(workout.startTime)} → ${formatter.format(workout.endTime)}, " +
+                            "${formatDouble(workout.caloriesKcal)} kcal " +
+                            "(${workout.exclusionReason})",
                     )
                 }
             }
@@ -63,7 +81,10 @@ class ReportBuilder(
     }
 
     fun buildCsv(reportDays: Int = 90): String = buildString {
-        appendLine("date,steps_total,steps_ohealth,calories_kcal,workout_count,workout_calories_kcal,sleep_minutes")
+        appendLine(
+            "date,steps_total,steps_ohealth,calories_kcal,workout_count," +
+                "workout_calories_kcal,sleep_minutes,time_in_bed_minutes",
+        )
         metricsStore.recentDays(reportDays).forEach { day ->
             appendLine(
                 listOf(
@@ -74,6 +95,7 @@ class ReportBuilder(
                     day.workoutCount,
                     day.workoutCaloriesKcal?.toString() ?: "",
                     day.sleepMinutes?.toString() ?: "",
+                    day.timeInBedMinutes?.toString() ?: "",
                 ).joinToString(","),
             )
         }

@@ -45,10 +45,10 @@
         android:fillColor="#FFFFFF"
         android:pathData="M57,88H61V92H57Z" />
 
-    <!-- 0 -->
+    <!-- 1 -->
     <path
         android:fillColor="#FFFFFF"
-        android:pathData="M65,70H77V73H65ZM65,73H68V89H65ZM74,73H77V89H74ZM65,89H77V92H65Z" />
+        android:pathData="M67,73L72,70H75V92H71V76H67Z" />
 
     <!-- small upload arrow -->
     <path
