@@ -1,6 +1,6 @@
 package dev.gr0mi4.ohealthinsights.drive
 
-import android.app.Activity
+import android.content.Context
 import androidx.activity.result.IntentSenderRequest
 import com.google.android.gms.auth.api.identity.AuthorizationRequest
 import com.google.android.gms.auth.api.identity.AuthorizationResult
@@ -14,12 +14,20 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
 
+/** Raised when Google wants to show a consent screen but no UI is available to show it. */
+class DriveAuthorizationRequired : Exception("Google Drive authorization is required.")
+
+/**
+ * Takes a [Context] rather than an Activity so the background worker can upload without a screen.
+ * [launchAuth] is null in that case, which turns any consent prompt into
+ * [DriveAuthorizationRequired] instead of a silent hang.
+ */
 class DriveUploader(
-    private val activity: Activity,
+    context: Context,
     private val settingsStore: DriveSettingsStore,
     private val reportBuilder: ReportBuilder,
 ) {
-    private val authorizationClient = Identity.getAuthorizationClient(activity)
+    private val authorizationClient = Identity.getAuthorizationClient(context.applicationContext)
 
     fun canAutoUpload(settings: DriveSettings, diagnostic: Boolean): Boolean =
         settingsStore.isConfigured() &&
@@ -33,11 +41,10 @@ class DriveUploader(
         exportedAt: Instant,
         sessionWorkouts: List<WorkoutMetric>,
         onProgress: (String) -> Unit,
-        launchAuth: suspend (IntentSenderRequest) -> AuthorizationResult?,
+        launchAuth: (suspend (IntentSenderRequest) -> AuthorizationResult?)?,
     ): DriveUploadResult {
         val settings = settingsStore.load()
-        val token = resolveAccessToken(launchAuth)
-            ?: error("Google Drive authorization is required.")
+        val token = resolveAccessToken(launchAuth) ?: throw DriveAuthorizationRequired()
         val names = settings.withResolvedNames(
             NamingContext(
                 syncMode = summary.syncMode,
@@ -70,7 +77,7 @@ class DriveUploader(
     }
 
     suspend fun resolveAccessToken(
-        launchAuth: suspend (IntentSenderRequest) -> AuthorizationResult?,
+        launchAuth: (suspend (IntentSenderRequest) -> AuthorizationResult?)?,
     ): String? {
         val request = AuthorizationRequest.builder()
             .setRequestedScopes(listOf(Scope(DriveAuth.DRIVE_FILE_SCOPE)))
@@ -79,7 +86,7 @@ class DriveUploader(
         val result = when {
             initial.hasResolution() -> {
                 val pending = initial.pendingIntent ?: return null
-                launchAuth(IntentSenderRequest.Builder(pending.intentSender).build())
+                launchAuth?.invoke(IntentSenderRequest.Builder(pending.intentSender).build())
             }
             else -> initial
         } ?: return null

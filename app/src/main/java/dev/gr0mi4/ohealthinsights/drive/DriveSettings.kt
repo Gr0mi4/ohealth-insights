@@ -6,6 +6,7 @@ import dev.gr0mi4.ohealthinsights.BuildConfig
 
 data class DriveSettings(
     val autoUploadEnabled: Boolean = false,
+    val autoSyncEnabled: Boolean = false,
     val driveAuthorizationGranted: Boolean = false,
     val rootFolderName: String = "OHealth Insights",
     val reportsFolderName: String = "Reports",
@@ -30,6 +31,7 @@ class DriveSettingsStore(context: Context) {
 
     fun load(): DriveSettings = DriveSettings(
         autoUploadEnabled = prefs.getBoolean(KEY_AUTO_UPLOAD, false),
+        autoSyncEnabled = prefs.getBoolean(KEY_AUTO_SYNC, false),
         driveAuthorizationGranted = prefs.getBoolean(
             KEY_DRIVE_AUTHORIZATION_GRANTED,
             !prefs.getString(KEY_ACCOUNT_EMAIL, null).isNullOrBlank(),
@@ -61,6 +63,7 @@ class DriveSettingsStore(context: Context) {
     fun save(settings: DriveSettings) {
         prefs.edit()
             .putBoolean(KEY_AUTO_UPLOAD, settings.autoUploadEnabled)
+            .putBoolean(KEY_AUTO_SYNC, settings.autoSyncEnabled)
             .putBoolean(KEY_DRIVE_AUTHORIZATION_GRANTED, settings.driveAuthorizationGranted)
             .putString(KEY_ROOT_FOLDER, settings.rootFolderName)
             .putString(KEY_REPORTS_FOLDER, settings.reportsFolderName)
@@ -117,6 +120,7 @@ class DriveSettingsStore(context: Context) {
         private const val PREFS_NAME = "ohealth_drive_settings"
 
         private const val KEY_AUTO_UPLOAD = "auto_upload"
+        private const val KEY_AUTO_SYNC = "auto_sync"
         private const val KEY_DRIVE_AUTHORIZATION_GRANTED = "drive_authorization_granted"
         private const val KEY_ROOT_FOLDER = "root_folder_name"
         private const val KEY_REPORTS_FOLDER = "reports_folder_name"

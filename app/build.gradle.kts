@@ -20,8 +20,8 @@ android {
         applicationId = "dev.gr0mi4.ohealthinsights"
         minSdk = 28
         targetSdk = 35
-        versionCode = 11
-        versionName = "0.4.3"
+        versionCode = 12
+        versionName = "0.5.0"
         buildConfigField(
             "String",
             "DRIVE_OAUTH_CLIENT_ID",
@@ -73,6 +73,7 @@ dependencies {
     implementation("androidx.activity:activity-ktx:1.10.1")
     implementation("androidx.core:core-ktx:1.16.0")
     implementation("androidx.health.connect:connect-client:1.1.0")
+    implementation("androidx.work:work-runtime-ktx:2.10.0")
     implementation("com.google.android.gms:play-services-auth:21.3.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")

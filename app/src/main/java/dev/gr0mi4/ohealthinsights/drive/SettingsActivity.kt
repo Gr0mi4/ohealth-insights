@@ -1,5 +1,7 @@
 package dev.gr0mi4.ohealthinsights.drive
 
+import android.Manifest
+import android.os.Build
 import android.os.Bundle
 import android.view.Gravity
 import android.widget.Button
@@ -17,6 +19,8 @@ import com.google.android.gms.auth.api.identity.AuthorizationRequest
 import com.google.android.gms.auth.api.identity.AuthorizationResult
 import com.google.android.gms.auth.api.identity.Identity
 import com.google.android.gms.common.api.Scope
+import dev.gr0mi4.ohealthinsights.AutoSyncScheduler
+import dev.gr0mi4.ohealthinsights.SyncNotifications
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
@@ -26,6 +30,7 @@ class SettingsActivity : ComponentActivity() {
     private lateinit var settingsStore: DriveSettingsStore
     private lateinit var statusText: TextView
     private lateinit var autoUploadCheck: CheckBox
+    private lateinit var autoSyncCheck: CheckBox
     private lateinit var updateLatestCheck: CheckBox
     private lateinit var rootFolderInput: EditText
     private lateinit var reportsFolderInput: EditText
@@ -37,6 +42,15 @@ class SettingsActivity : ComponentActivity() {
     private lateinit var latestCsvInput: EditText
 
     private val authorizationClient by lazy { Identity.getAuthorizationClient(this) }
+
+    private val notificationPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (!granted) {
+            statusText.text = "Automatic sync will run, but failures cannot be reported without " +
+                "notification access."
+        }
+    }
 
     private val authLauncher = registerForActivityResult(
         ActivityResultContracts.StartIntentSenderForResult(),
@@ -72,6 +86,11 @@ class SettingsActivity : ComponentActivity() {
 
         statusText = TextView(this).apply { textSize = 15f }
         autoUploadCheck = CheckBox(this).apply { text = "Auto-upload after sync" }
+        autoSyncCheck = CheckBox(this).apply {
+            text = "Sync automatically once a day"
+            // Click rather than checked-change: renderSettings must not trigger a permission prompt.
+            setOnClickListener { view -> if ((view as CheckBox).isChecked) requestNotificationPermission() }
+        }
         updateLatestCheck = CheckBox(this).apply { text = "Maintain latest report + CSV files" }
         rootFolderInput = labeledInput("Root folder name")
         reportsFolderInput = labeledInput("Reports subfolder")
@@ -84,6 +103,12 @@ class SettingsActivity : ComponentActivity() {
 
         val placeholders = TextView(this).apply {
             text = "Template placeholders: {date}, {timestamp}, {syncMode}, {version}"
+            textSize = 13f
+        }
+
+        val autoSyncHint = TextView(this).apply {
+            text = "Needs auto-upload, a connected Drive account, Health Connect background read " +
+                "access, and one completed sync. The first full sync always runs from the main screen."
             textSize = 13f
         }
 
@@ -114,7 +139,9 @@ class SettingsActivity : ComponentActivity() {
             })
             addView(statusText, wrap(top = 8))
             addView(autoUploadCheck, wrap(top = 12))
-            addView(updateLatestCheck, wrap(top = 4))
+            addView(autoSyncCheck, wrap(top = 4))
+            addView(autoSyncHint, wrap(top = 2))
+            addView(updateLatestCheck, wrap(top = 8))
             addView(rootFolderInput, wrap(top = 12))
             addView(reportsFolderInput, wrap(top = 8))
             addView(archiveFolderInput, wrap(top = 8))
@@ -151,6 +178,7 @@ class SettingsActivity : ComponentActivity() {
             return
         }
         autoUploadCheck.isChecked = settings.autoUploadEnabled
+        autoSyncCheck.isChecked = settings.autoSyncEnabled
         updateLatestCheck.isChecked = settings.updateLatestReport
         rootFolderInput.setText(settings.rootFolderName)
         reportsFolderInput.setText(settings.reportsFolderName)
@@ -172,6 +200,7 @@ class SettingsActivity : ComponentActivity() {
         val existing = settingsStore.load()
         return existing.copy(
             autoUploadEnabled = autoUploadCheck.isChecked,
+            autoSyncEnabled = autoSyncCheck.isChecked,
             updateLatestReport = updateLatestCheck.isChecked,
             rootFolderName = rootFolderInput.text.toString().ifBlank { existing.rootFolderName },
             reportsFolderName = reportsFolderInput.text.toString().ifBlank { existing.reportsFolderName },
@@ -185,9 +214,17 @@ class SettingsActivity : ComponentActivity() {
     }
 
     private fun saveSettings() {
-        settingsStore.save(currentSettings())
+        val settings = currentSettings()
+        settingsStore.save(settings)
+        AutoSyncScheduler.update(this, settings.autoSyncEnabled && settings.autoUploadEnabled)
         Toast.makeText(this, "Settings saved", Toast.LENGTH_SHORT).show()
         renderSettings(settingsStore.load())
+    }
+
+    private fun requestNotificationPermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        if (SyncNotifications.canNotify(this)) return
+        notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
     }
 
     private fun connectGoogleAccount() {

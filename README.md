@@ -42,7 +42,7 @@ Raw source data should remain immutable. Normalized datasets are derived views a
 5. **Sync** raw and normalized data to private user-controlled storage.
 6. **Analyze** history, trends, workload, recovery, sleep, activity, and any other available signals.
 
-## Android exporter 0.4.3
+## Android exporter 0.5.0
 
 The default export is a compact, gzip-compressed synchronization stream:
 
@@ -63,7 +63,7 @@ The default export is a compact, gzip-compressed synchronization stream:
 
 Drive authorization is persisted independently from the optional Google account email. This
 prevents a successful Drive-only OAuth grant from appearing disconnected after the settings
-screen is reopened. The launcher icon carries the installed `0.4.3` version badge.
+screen is reopened. The launcher icon carries the installed `0.5.0` version badge.
 
 After each compact sync, the app can upload three artifacts to a Drive folder tree it creates and owns (`drive.file` scope):
 
@@ -73,6 +73,19 @@ After each compact sync, the app can upload three artifacts to a Drive folder tr
 
 **Test connection** provisions the whole folder tree and writes `ohealth-connection-test.txt` into the
 root folder, so a passing test proves upload access rather than folder-creation access alone.
+
+### Daily automatic sync
+
+Enable **Sync automatically once a day** in Drive upload settings to run the compact sync without
+opening the app. It requires auto-upload, a connected Drive account, Health Connect background read
+access, and one completed sync.
+
+The first full history export always stays manual: it can exceed the ten minutes WorkManager allows a
+background worker. Automatic runs only ever take the incremental path.
+
+Failures retry with exponential backoff and never advance the checkpoint, so a failed run re-exports
+the same range rather than losing data. Success is silent; a notification appears only after repeated
+failures or when Drive access has to be granted again.
 
 Configure OAuth and folder naming in **Drive upload settings**. See [docs/GOOGLE_DRIVE_SETUP.md](docs/GOOGLE_DRIVE_SETUP.md) for Google Cloud setup, SHA-1 registration, and ChatGPT connector instructions.
 
