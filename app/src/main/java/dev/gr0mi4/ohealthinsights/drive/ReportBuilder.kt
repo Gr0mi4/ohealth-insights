@@ -28,6 +28,16 @@ class ReportBuilder(
             appendLine("- Derived summaries: ${summary.derivedRecordCount}")
             appendLine("- Non-empty record types: ${summary.nonEmptyTypes}")
             appendLine()
+            appendLine("## Analysis contract")
+            appendLine()
+            appendLine("- Canonical daily steps: `Steps (OHealth)` when present; use `Steps (dedup)` only as an explicit fallback/debug value.")
+            appendLine("- A row for the export day may be partial when the sync ran before the local day ended.")
+            appendLine("- Raw exercise records are activity records, not automatically separate training sessions.")
+            appendLine("- Generic `Workout` may be walking, warm-up/cool-down, or an adjacent fragment; `Freestyle workout` is semantically ambiguous.")
+            appendLine("- Classify ambiguous sessions using duration, kcal/min, HR/HR zones, steps/step rate, distance, overlap/adjacency, context, and user-confirmed ground truth.")
+            appendLine("- Separate deliberate training from light activity/everyday walking; if evidence is insufficient, keep the session unclassified rather than guessing.")
+            appendLine("- Full interpretation rules: `docs/ANALYSIS_CONTRACT.md` in the ohealth-insights repository.")
+            appendLine()
             appendLine("## Last $reportDays days")
             appendLine()
             appendLine("| Date | Steps (dedup) | Steps (OHealth) | Calories (kcal) | Workouts | Sleep (min) |")
@@ -41,7 +51,9 @@ class ReportBuilder(
             }
             if (sessionWorkouts.isNotEmpty()) {
                 appendLine()
-                appendLine("## Workouts in this sync")
+                appendLine("## Exercise records in this sync")
+                appendLine()
+                appendLine("*These are source exercise records and must not be interpreted as distinct training sessions without classification.*")
                 appendLine()
                 sessionWorkouts.forEach { workout ->
                     appendLine(
