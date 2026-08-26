@@ -41,20 +41,27 @@ class DriveClient(
             resumable = rawFile.length() > MULTIPART_LIMIT_BYTES,
         ).also { uploaded += names.rawFileName }
 
+        // Housekeeping must never sink a sync that already delivered its data.
+        runCatching { pruneArchive(archiveId) }
+
+        // Drive allows several files to share a name in one folder, so a second sync on the same day
+        // would leave the assistant two versions of the same dated report to reconcile.
         onProgress("Uploading dated report")
-        uploadTextFile(
+        upsertTextFile(
             name = names.reportFileName,
             mimeType = "text/markdown",
             parentId = reportsId,
             content = reportMarkdown,
+            existingFileId = null,
         ).also { uploaded += names.reportFileName }
 
         onProgress("Uploading dated metrics CSV")
-        uploadTextFile(
+        upsertTextFile(
             name = names.csvFileName,
             mimeType = "text/csv",
             parentId = reportsId,
             content = csvContent,
+            existingFileId = null,
         ).also { uploaded += names.csvFileName }
 
         var latestReportId: String? = null
@@ -229,6 +236,34 @@ class DriveClient(
         return JSONObject(execute(request))
     }
 
+    /**
+     * Daily syncs mean a raw archive every day and none of them are ever read again once the reports
+     * exist, so the folder is trimmed to the most recent [ARCHIVE_KEEP].
+     */
+    private fun pruneArchive(archiveId: String) {
+        val query = "'$archiveId' in parents and trashed=false"
+        val encoded = URLEncoder.encode(query, StandardCharsets.UTF_8)
+        val request = Request.Builder()
+            .url("$BASE/files?q=$encoded&spaces=drive&orderBy=createdTime%20desc&pageSize=1000&fields=files(id)")
+            .get()
+            .header("Authorization", authHeader())
+            .build()
+        val files = JSONObject(execute(request)).optJSONArray("files") ?: JSONArray()
+        for (index in ARCHIVE_KEEP until files.length()) {
+            val fileId = files.getJSONObject(index).getString("id")
+            runCatching { deleteFile(fileId) }
+        }
+    }
+
+    private fun deleteFile(fileId: String) {
+        val request = Request.Builder()
+            .url("$BASE/files/$fileId")
+            .delete()
+            .header("Authorization", authHeader())
+            .build()
+        execute(request)
+    }
+
     private fun findFileByName(name: String, parentId: String): JSONObject? {
         val query = "name='${escapeQuery(name)}' and '$parentId' in parents and trashed=false"
         return listFiles(query).firstOrNull()
@@ -303,6 +338,7 @@ class DriveClient(
         private val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
         private const val MULTIPART_LIMIT_BYTES = 5L * 1024 * 1024
         private const val CONNECTION_PROBE_NAME = "ohealth-connection-test.txt"
+        private const val ARCHIVE_KEEP = 60
 
         // Uploads run over mobile networks and can carry several megabytes, so the
         // stock ten-second OkHttp timeouts are far too aggressive here.

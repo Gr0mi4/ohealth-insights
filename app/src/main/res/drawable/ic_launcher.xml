@@ -35,20 +35,20 @@
         android:fillColor="#FFFFFF"
         android:pathData="M33,88H37V92H33Z" />
 
-    <!-- 5 -->
+    <!-- 6 -->
     <path
         android:fillColor="#FFFFFF"
-        android:pathData="M41,70H53V73H41ZM41,73H44V82H41ZM41,80H53V84H41ZM50,82H53V89H50ZM41,89H53V92H41Z" />
+        android:pathData="M41,70H53V73H41ZM41,73H44V89H41ZM41,80H53V84H41ZM50,82H53V89H50ZM41,89H53V92H41Z" />
 
     <!-- . -->
     <path
         android:fillColor="#FFFFFF"
         android:pathData="M57,88H61V92H57Z" />
 
-    <!-- 0 -->
+    <!-- 2 -->
     <path
         android:fillColor="#FFFFFF"
-        android:pathData="M65,70H77V73H65ZM65,73H68V89H65ZM74,73H77V89H74ZM65,89H77V92H65Z" />
+        android:pathData="M65,70H77V73H65ZM74,73H77V81H74ZM65,81H77V84H65ZM65,84H68V89H65ZM65,89H77V92H65Z" />
 
     <!-- small upload arrow -->
     <path

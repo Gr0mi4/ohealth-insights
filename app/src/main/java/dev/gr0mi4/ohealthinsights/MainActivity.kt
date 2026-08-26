@@ -24,6 +24,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import com.google.android.gms.auth.api.identity.AuthorizationResult
 import com.google.android.gms.auth.api.identity.Identity
 import dev.gr0mi4.ohealthinsights.drive.DriveSettingsStore
+import dev.gr0mi4.ohealthinsights.drive.DriveUploadStatus
 import dev.gr0mi4.ohealthinsights.drive.SettingsActivity
 import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
@@ -33,9 +34,11 @@ import androidx.lifecycle.lifecycleScope
 import java.io.File
 import java.time.Instant
 import java.time.LocalDate
+import java.time.ZoneId
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import java.util.concurrent.atomic.AtomicReference
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -44,6 +47,7 @@ import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
     private lateinit var statusText: TextView
+    private lateinit var driveSyncDebugText: TextView
     private lateinit var detailsText: TextView
     private lateinit var permissionsButton: Button
     private lateinit var exportButton: Button
@@ -109,13 +113,17 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch {
             val result = runCatching {
                 withContext(Dispatchers.IO) {
-                    contentResolver.openOutputStream(destination, "w")!!.use { output ->
-                        source.inputStream().use { input -> input.copyTo(output) }
+                    val output = contentResolver.openOutputStream(destination, "w")
+                        ?: error("The selected location did not accept a file.")
+                    output.use { stream ->
+                        source.inputStream().use { input -> input.copyTo(stream) }
                     }
                     source.delete()
                     checkpoint?.let(syncState::persistCheckpoint) ?: true
                 }
             }
+            // A cancelled scope means the screen is going away, not that the save failed.
+            result.exceptionOrNull()?.let { if (it is CancellationException) throw it }
 
             result.onSuccess { checkpointSaved ->
                 debugLog.add("Export saved; checkpoint persisted: $checkpointSaved")
@@ -162,6 +170,12 @@ class MainActivity : ComponentActivity() {
             text = "Checking Health Connect…"
             textSize = 22f
         }
+
+        driveSyncDebugText = TextView(this).apply {
+            textSize = 13f
+            setTextIsSelectable(true)
+        }
+        updateDriveSyncDebugText()
 
         detailsText = TextView(this).apply {
             text = "Compact sync keeps workout and sleep heart rate, daily steps and calories, " +
@@ -212,6 +226,7 @@ class MainActivity : ComponentActivity() {
             gravity = Gravity.CENTER_HORIZONTAL
             setPadding(padding, padding, padding, padding)
             addView(statusText, matchWrap())
+            addView(driveSyncDebugText, matchWrap(top = 8))
             addView(permissionsButton, matchWrap(top = 16))
             addView(exportButton, matchWrap(top = 8))
             addView(fullExportButton, matchWrap(top = 8))
@@ -258,6 +273,7 @@ class MainActivity : ComponentActivity() {
 
     private fun refreshPermissionState() {
         val client = healthConnectClient ?: return
+        updateDriveSyncDebugText()
         lifecycleScope.launch {
             val granted = runCatching {
                 client.permissionController.getGrantedPermissions()
@@ -381,6 +397,7 @@ class MainActivity : ComponentActivity() {
         )
         statusText.text =
             if (outcome.checkpointSaved) "Sync uploaded to Drive" else "Uploaded; checkpoint failed"
+        updateDriveSyncDebugText()
         detailsText.text = buildString {
             append(buildExportSummary(outcome.summary, startedAt))
             appendLine()
@@ -492,6 +509,7 @@ class MainActivity : ComponentActivity() {
             appendLine("OHealth Insights ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})")
             appendLine("Device: ${Build.MANUFACTURER} ${Build.MODEL}, Android ${Build.VERSION.RELEASE} (SDK ${Build.VERSION.SDK_INT})")
             appendLine("Health Connect: ${sdkStatusName()}")
+            appendLine(formatDriveSyncDebug(driveSettingsStore.lastSuccessfulUpload()))
             appendLine()
             appendLine("STAGE LOG")
             val entries = debugLog.snapshot()
@@ -510,6 +528,17 @@ class MainActivity : ComponentActivity() {
         if (::historyStartButton.isInitialized) {
             historyStartButton.text = "History starts: ${syncState.historyStartDate()}"
         }
+    }
+
+    private fun updateDriveSyncDebugText() {
+        if (::driveSyncDebugText.isInitialized) {
+            driveSyncDebugText.text = formatDriveSyncDebug(driveSettingsStore.lastSuccessfulUpload())
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        updateDriveSyncDebugText()
     }
 
     private fun chooseHistoryStartDate() {
@@ -623,6 +652,23 @@ class MainActivity : ComponentActivity() {
         private const val healthConnectProviderPackage = "com.google.android.apps.healthdata"
         private const val progressRefreshMillis = 500L
         private const val visibleStageCount = 6
+    }
+}
+
+internal fun formatDriveSyncDebug(status: DriveUploadStatus?): String {
+    if (status == null) return "DEBUG — Last successful Drive write: not recorded yet"
+    val completedAt = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss z")
+        .withZone(ZoneId.systemDefault())
+        .format(status.completedAt)
+    val details = buildList {
+        status.trigger?.let { add(it) }
+        status.syncMode?.let { add(it) }
+        if (status.uploadedFileCount > 0) add("${status.uploadedFileCount} files")
+        status.appVersion?.let { add("app $it") }
+    }.joinToString(" · ")
+    return buildString {
+        append("DEBUG — Last successful Drive write: $completedAt")
+        if (details.isNotBlank()) append("\n$details")
     }
 }
 
