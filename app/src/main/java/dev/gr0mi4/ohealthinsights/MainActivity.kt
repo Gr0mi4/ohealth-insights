@@ -63,6 +63,10 @@ class MainActivity : ComponentActivity() {
     private var pendingExport: File? = null
     private var pendingCheckpoint: SyncCheckpoint? = null
 
+    private var displayedProgress = 0
+    private var lastProgressStage: String? = null
+    private var lastProgressStageAt = 0L
+
     private var pendingDriveAuthContinuation: ((AuthorizationResult?) -> Unit)? = null
 
     private val driveAuthLauncher = registerForActivityResult(
@@ -203,7 +207,10 @@ class MainActivity : ComponentActivity() {
             setOnClickListener { chooseHistoryStartDate() }
         }
 
-        progressBar = ProgressBar(this).apply {
+        progressBar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            isIndeterminate = false
+            max = 100
+            progress = 0
             visibility = View.GONE
         }
 
@@ -218,7 +225,7 @@ class MainActivity : ComponentActivity() {
             addView(historyStartButton, matchWrap(top = 8))
             addView(copyLogButton, matchWrap(top = 8))
             addView(settingsButton, matchWrap(top = 8))
-            addView(progressBar, wrapWrap(top = 12))
+            addView(progressBar, matchWrap(top = 12))
             addView(detailsText, matchWrap(top = 16))
         }
 
@@ -326,6 +333,10 @@ class MainActivity : ComponentActivity() {
 
     private fun startExport(diagnostic: Boolean) {
         val client = healthConnectClient ?: return
+        displayedProgress = 0
+        lastProgressStage = null
+        lastProgressStageAt = SystemClock.elapsedRealtime()
+        progressBar.progress = 0
         setBusy(true)
         statusText.text = if (diagnostic) "Diagnostic export running" else "Compact sync running"
 
@@ -375,6 +386,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun showUploaded(outcome: SyncOutcome.Uploaded, startedAt: Long) {
+        completeProgress()
         debugLog.add(
             "Drive upload complete: ${outcome.uploadedFiles.joinToString()}",
             SystemClock.elapsedRealtime() - startedAt,
@@ -396,6 +408,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun showReadyToSave(outcome: SyncOutcome.ReadyToSave, startedAt: Long) {
+        completeProgress()
         debugLog.add(
             "Export finished: ${outcome.summary.syncMode}, ${outcome.summary.rawRecordCount} raw records",
             SystemClock.elapsedRealtime() - startedAt,
@@ -449,7 +462,32 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun renderProgress(stage: String, startedAt: Long) {
+        val now = SystemClock.elapsedRealtime()
+        if (stage != lastProgressStage) {
+            lastProgressStage = stage
+            lastProgressStageAt = now
+        }
+
+        val estimated = estimateProgress(stage)
+        if (estimated > displayedProgress) {
+            displayedProgress = estimated
+            progressBar.setProgress(displayedProgress, true)
+        }
+
+        val stageAge = (now - lastProgressStageAt).coerceAtLeast(0L)
+        val possibleStallAfter = possibleStallAfterMillis(stage)
+        val activity = when {
+            stageAge >= possibleStallAfter ->
+                "POSSIBLE STALL — this stage has not changed for ${formatElapsed(stageAge)}."
+            stageAge >= slowStageNoticeMillis ->
+                "Still working on this step for ${formatElapsed(stageAge)}."
+            else -> "Current step age: ${formatElapsed(stageAge)}."
+        }
+
         detailsText.text = buildString {
+            appendLine("PROGRESS: $displayedProgress%")
+            appendLine(activity)
+            appendLine()
             appendLine("CURRENT STAGE")
             appendLine(stage)
             appendLine()
@@ -462,6 +500,80 @@ class MainActivity : ComponentActivity() {
                 recent.forEach { appendLine(it) }
             }
         }
+    }
+
+    private fun estimateProgress(stage: String): Int {
+        rangeProgressRegex.find(stage)?.let { match ->
+            val current = match.groupValues[1].toIntOrNull() ?: return displayedProgress
+            val total = match.groupValues[2].toIntOrNull() ?: return displayedProgress
+            if (total > 0) {
+                val withinRange = estimateWithinRange(stage)
+                val completed = (current - 1).coerceAtLeast(0).toDouble() + withinRange
+                val progress = exportProgressStart + (completed / total) * exportProgressSpan
+                return progress.toInt().coerceIn(exportProgressStart, exportProgressEnd)
+            }
+        }
+
+        probeProgressRegex.find(stage)?.let { match ->
+            val current = match.groupValues[1].toIntOrNull() ?: return displayedProgress
+            val total = match.groupValues[2].toIntOrNull() ?: return displayedProgress
+            if (total > 0) {
+                return (4 + (current.toDouble() / total) * 5).toInt().coerceIn(4, 9)
+            }
+        }
+
+        return when {
+            stage.startsWith("Starting") -> 1
+            stage.startsWith("Reading Health Connect permissions") -> 2
+            stage.startsWith("Creating incremental cursor") -> 4
+            stage.startsWith("Reading incremental changes") -> 6
+            stage.startsWith("Finalizing compressed export") -> 89
+            stage.startsWith("Ensuring Drive folders") -> 91
+            stage.startsWith("Uploading raw export") -> 94
+            stage.startsWith("Uploading dated report") -> 96
+            stage.startsWith("Uploading dated metrics CSV") -> 97
+            stage.startsWith("Updating latest report files") -> 99
+            else -> displayedProgress
+        }
+    }
+
+    private fun estimateWithinRange(stage: String): Double {
+        rawProgressRegex.find(stage)?.let { match ->
+            val current = match.groupValues[1].toIntOrNull() ?: return 0.02
+            val total = match.groupValues[2].toIntOrNull() ?: return 0.02
+            if (total > 0) return (current.toDouble() / total).coerceIn(0.02, 0.99)
+        }
+
+        workoutProgressRegex.find(stage)?.let { match ->
+            val current = match.groupValues[1].toIntOrNull() ?: return 0.92
+            val total = match.groupValues[2].toIntOrNull() ?: return 0.92
+            if (total > 0) return (0.92 + 0.07 * current.toDouble() / total).coerceAtMost(0.99)
+        }
+
+        return when {
+            stage.contains("OHealth steps") -> 0.90
+            stage.contains("daily totals") -> 0.84
+            stage.contains("sleep breathing") -> 0.78
+            stage.contains("sleep oxygen") -> 0.72
+            stage.contains("heart rate") -> 0.65
+            stage.contains(" records") -> 0.30
+            stage.contains(" sleep") -> 0.12
+            stage.contains(" workouts") -> 0.05
+            else -> 0.02
+        }
+    }
+
+    private fun possibleStallAfterMillis(stage: String): Long = when {
+        stage.startsWith("Uploading raw export") -> rawUploadStallMillis
+        stage.startsWith("Ensuring Drive folders") ||
+            stage.startsWith("Uploading dated") ||
+            stage.startsWith("Updating latest") -> driveStageStallMillis
+        else -> healthStageStallMillis
+    }
+
+    private fun completeProgress() {
+        displayedProgress = 100
+        progressBar.setProgress(100, true)
     }
 
     private suspend fun requestDriveAuthorization(
@@ -623,6 +735,17 @@ class MainActivity : ComponentActivity() {
         private const val healthConnectProviderPackage = "com.google.android.apps.healthdata"
         private const val progressRefreshMillis = 500L
         private const val visibleStageCount = 6
+        private const val exportProgressStart = 10
+        private const val exportProgressEnd = 88
+        private const val exportProgressSpan = exportProgressEnd - exportProgressStart
+        private const val slowStageNoticeMillis = 10_000L
+        private const val healthStageStallMillis = 45_000L
+        private const val driveStageStallMillis = 60_000L
+        private const val rawUploadStallMillis = 120_000L
+        private val rangeProgressRegex = Regex("Range (\\d+)/(\\d+)")
+        private val probeProgressRegex = Regex("Probe (\\d+)/(\\d+)")
+        private val rawProgressRegex = Regex("raw (\\d+)/(\\d+)")
+        private val workoutProgressRegex = Regex("workout calories (\\d+)/(\\d+)")
     }
 }
 
