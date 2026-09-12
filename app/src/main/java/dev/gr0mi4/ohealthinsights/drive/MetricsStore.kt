@@ -11,6 +11,7 @@ data class DailyMetric(
     val stepsTotal: Long? = null,
     val stepsOHealth: Long? = null,
     val totalCaloriesKcal: Double? = null,
+    val activeCaloriesOHealthKcal: Double? = null,
     val workoutCount: Int = 0,
     val workoutCaloriesKcal: Double? = null,
     val sleepMinutes: Long? = null,
@@ -40,6 +41,7 @@ class MetricsStore(context: android.content.Context) {
                 stepsTotal = metric.stepsTotal ?: existing?.stepsTotal,
                 stepsOHealth = metric.stepsOHealth ?: existing?.stepsOHealth,
                 totalCaloriesKcal = metric.totalCaloriesKcal ?: existing?.totalCaloriesKcal,
+                activeCaloriesOHealthKcal = metric.activeCaloriesOHealthKcal ?: existing?.activeCaloriesOHealthKcal,
                 updatedAt = metric.updatedAt,
             )
             prune(metrics)
@@ -121,6 +123,7 @@ class MetricsStore(context: android.content.Context) {
         stepsTotal?.let { put("stepsTotal", it) }
         stepsOHealth?.let { put("stepsOHealth", it) }
         totalCaloriesKcal?.let { put("totalCaloriesKcal", it) }
+        activeCaloriesOHealthKcal?.let { put("activeCaloriesOHealthKcal", it) }
         put("workoutCount", workoutCount)
         workoutCaloriesKcal?.let { put("workoutCaloriesKcal", it) }
         sleepMinutes?.let { put("sleepMinutes", it) }
@@ -132,6 +135,7 @@ class MetricsStore(context: android.content.Context) {
         stepsTotal = optLongOrNull("stepsTotal"),
         stepsOHealth = optLongOrNull("stepsOHealth"),
         totalCaloriesKcal = optDoubleOrNull("totalCaloriesKcal"),
+        activeCaloriesOHealthKcal = optDoubleOrNull("activeCaloriesOHealthKcal"),
         workoutCount = optInt("workoutCount", 0),
         workoutCaloriesKcal = optDoubleOrNull("workoutCaloriesKcal"),
         sleepMinutes = optLongOrNull("sleepMinutes"),
@@ -160,6 +164,7 @@ class ReportCollector(
         stepsTotal: Long?,
         stepsOHealth: Long?,
         totalCaloriesKcal: Double?,
+        activeCaloriesOHealthKcal: Double?,
     ) {
         metricsStore.upsertDaily(
             DailyMetric(
@@ -167,6 +172,7 @@ class ReportCollector(
                 stepsTotal = stepsTotal,
                 stepsOHealth = stepsOHealth,
                 totalCaloriesKcal = totalCaloriesKcal,
+                activeCaloriesOHealthKcal = activeCaloriesOHealthKcal,
             ),
         )
     }
