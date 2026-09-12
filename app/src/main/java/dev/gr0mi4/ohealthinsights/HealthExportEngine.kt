@@ -153,7 +153,7 @@ class HealthExportEngine(
                     "rangeCount" to plan.ranges.size,
                     "heartRatePolicy" to "workout_or_sleep_windows",
                     "stepsPolicy" to "daily_deduplicated_and_ohealth",
-                    "caloriesPolicy" to "daily_and_per_workout",
+                    "caloriesPolicy" to "daily_total_ohealth_active_and_per_workout",
                     "compression" to "gzip",
                     "changesTokenExpired" to plan.changesTokenExpired,
                 ),
@@ -686,8 +686,9 @@ class HealthExportEngine(
         reportCollector: ReportCollector?,
     ): Long {
         val canReadSteps = HealthPermission.getReadPermission(StepsRecord::class) in granted
-        val canReadCalories = HealthPermission.getReadPermission(TotalCaloriesBurnedRecord::class) in granted
-        if (!canReadSteps && !canReadCalories) return 0
+        val canReadTotalCalories = HealthPermission.getReadPermission(TotalCaloriesBurnedRecord::class) in granted
+        val canReadActiveCalories = HealthPermission.getReadPermission(ActiveCaloriesBurnedRecord::class) in granted
+        if (!canReadSteps && !canReadTotalCalories && !canReadActiveCalories) return 0
 
         val zone = ZoneId.systemDefault()
         val localStart = LocalDateTime.ofInstant(range.start, zone).toLocalDate().atStartOfDay()
@@ -698,19 +699,23 @@ class HealthExportEngine(
         val windows = dailyAggregationWindows(localStart, localEnd)
         val metrics = mutableSetOf<AggregateMetric<*>>().apply {
             if (canReadSteps) add(StepsRecord.COUNT_TOTAL)
-            if (canReadCalories) add(TotalCaloriesBurnedRecord.ENERGY_TOTAL)
+            if (canReadTotalCalories) add(TotalCaloriesBurnedRecord.ENERGY_TOTAL)
         }
-        val totals = windows.flatMapIndexed { index, window ->
-            criticalHealthCall("$label daily totals ${index + 1}/${windows.size}") {
-                client.aggregateGroupByPeriod(
-                    AggregateGroupByPeriodRequest(
-                        metrics = metrics,
-                        timeRangeFilter = TimeRangeFilter.between(window.start, window.end),
-                        timeRangeSlicer = Period.ofDays(1),
-                    ),
-                )
-            }
-        }.associateBy { it.startTime.toLocalDate() }
+        val totals = if (metrics.isNotEmpty()) {
+            windows.flatMapIndexed { index, window ->
+                criticalHealthCall("$label daily totals ${index + 1}/${windows.size}") {
+                    client.aggregateGroupByPeriod(
+                        AggregateGroupByPeriodRequest(
+                            metrics = metrics,
+                            timeRangeFilter = TimeRangeFilter.between(window.start, window.end),
+                            timeRangeSlicer = Period.ofDays(1),
+                        ),
+                    )
+                }
+            }.associateBy { it.startTime.toLocalDate() }
+        } else {
+            emptyMap()
+        }
         val ohealthSteps = if (canReadSteps) {
             windows.flatMapIndexed { index, window ->
                 criticalHealthCall("$label OHealth steps ${index + 1}/${windows.size}") {
@@ -727,21 +732,45 @@ class HealthExportEngine(
         } else {
             emptyMap()
         }
+        val ohealthActiveCalories = if (canReadActiveCalories) {
+            windows.flatMapIndexed { index, window ->
+                criticalHealthCall("$label OHealth active calories ${index + 1}/${windows.size}") {
+                    client.aggregateGroupByPeriod(
+                        AggregateGroupByPeriodRequest(
+                            metrics = setOf(ActiveCaloriesBurnedRecord.ACTIVE_CALORIES_TOTAL),
+                            timeRangeFilter = TimeRangeFilter.between(window.start, window.end),
+                            timeRangeSlicer = Period.ofDays(1),
+                            dataOriginFilter = setOf(DataOrigin(ohealthPackage)),
+                        ),
+                    )
+                }
+            }.associateBy { it.startTime.toLocalDate() }
+        } else {
+            emptyMap()
+        }
 
         var written = 0L
-        (totals.keys + ohealthSteps.keys).toSortedSet().forEach { date ->
+        (totals.keys + ohealthSteps.keys + ohealthActiveCalories.keys).toSortedSet().forEach { date ->
             if (!writtenDailyDates.add(date)) return@forEach
             val total = totals[date]?.result
+            val activeOHealth = ohealthActiveCalories[date]?.result
             writer.writeJsonLine(
                 jsonObject(
                     "kind" to "daily_activity",
                     "date" to date.toString(),
                     "stepsTotalDeduplicated" to total?.get(StepsRecord.COUNT_TOTAL),
                     "stepsOHealth" to ohealthSteps[date]?.result?.get(StepsRecord.COUNT_TOTAL),
+                    "activeCaloriesOHealthKcal" to activeOHealth
+                        ?.get(ActiveCaloriesBurnedRecord.ACTIVE_CALORIES_TOTAL)
+                        ?.inKilocalories,
                     "totalCaloriesKcal" to total
                         ?.get(TotalCaloriesBurnedRecord.ENERGY_TOTAL)
                         ?.inKilocalories,
                     "sourcePackages" to total?.dataOrigins
+                        ?.map { it.packageName }
+                        ?.sorted()
+                        ?.joinToString(","),
+                    "activeCaloriesOHealthSourcePackages" to activeOHealth?.dataOrigins
                         ?.map { it.packageName }
                         ?.sorted()
                         ?.joinToString(","),
@@ -753,6 +782,9 @@ class HealthExportEngine(
                 stepsOHealth = ohealthSteps[date]?.result?.get(StepsRecord.COUNT_TOTAL),
                 totalCaloriesKcal = total
                     ?.get(TotalCaloriesBurnedRecord.ENERGY_TOTAL)
+                    ?.inKilocalories,
+                activeCaloriesOHealthKcal = activeOHealth
+                    ?.get(ActiveCaloriesBurnedRecord.ACTIVE_CALORIES_TOTAL)
                     ?.inKilocalories,
             )
             written += 1
@@ -1178,6 +1210,7 @@ class HealthExportEngine(
             OxygenSaturationRecord::class,
             RespiratoryRateRecord::class,
             StepsRecord::class,
+            ActiveCaloriesBurnedRecord::class,
             TotalCaloriesBurnedRecord::class,
         )
 
