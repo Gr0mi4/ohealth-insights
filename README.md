@@ -52,7 +52,7 @@ The default export is a compact, gzip-compressed synchronization stream:
 - If a changes token expires, the app performs a bounded recovery from the previous successful export instead of silently skipping data.
 - Heart rate is retained only when associated with an exercise or sleep session.
 - Steps are represented as one deduplicated Health Connect total and one OHealth total per day.
-- Total calories are represented per day and per exercise session.
+- Active calories are represented per day and per exercise session using OHealth-origin records only.
 - Sleep-associated oxygen saturation and respiratory rate remain granular.
 - A manual full raw diagnostic export remains available for discovery and completeness checks.
 - The initial history floor defaults to 2025-04-01, but can be changed with the **History starts** date picker on the main screen to import older Health Connect/Zepp Life history.
