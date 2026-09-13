@@ -152,7 +152,7 @@ class HealthExportEngine(
                     "rangeCount" to plan.ranges.size,
                     "heartRatePolicy" to "workout_or_sleep_windows",
                     "stepsPolicy" to "daily_deduplicated_and_ohealth",
-                    "caloriesPolicy" to "ohealth_active_only_daily_and_per_workout",
+                    "caloriesPolicy" to "ohealth_active_with_ohealth_total_fallback",
                     "compression" to "gzip",
                     "changesTokenExpired" to plan.changesTokenExpired,
                 ),
@@ -686,7 +686,8 @@ class HealthExportEngine(
     ): Long {
         val canReadSteps = HealthPermission.getReadPermission(StepsRecord::class) in granted
         val canReadActiveCalories = HealthPermission.getReadPermission(ActiveCaloriesBurnedRecord::class) in granted
-        if (!canReadSteps && !canReadActiveCalories) return 0
+        val canReadTotalCalories = HealthPermission.getReadPermission(TotalCaloriesBurnedRecord::class) in granted
+        if (!canReadSteps && !canReadActiveCalories && !canReadTotalCalories) return 0
 
         val zone = ZoneId.systemDefault()
         val localStart = LocalDateTime.ofInstant(range.start, zone).toLocalDate().atStartOfDay()
@@ -742,38 +743,61 @@ class HealthExportEngine(
         } else {
             emptyMap()
         }
+        val ohealthTotalCalories = if (canReadTotalCalories) {
+            windows.flatMapIndexed { index, window ->
+                criticalHealthCall("$label OHealth total calorie fallback ${index + 1}/${windows.size}") {
+                    client.aggregateGroupByPeriod(
+                        AggregateGroupByPeriodRequest(
+                            metrics = setOf(TotalCaloriesBurnedRecord.ENERGY_TOTAL),
+                            timeRangeFilter = TimeRangeFilter.between(window.start, window.end),
+                            timeRangeSlicer = Period.ofDays(1),
+                            dataOriginFilter = setOf(DataOrigin(ohealthPackage)),
+                        ),
+                    )
+                }
+            }.associateBy { it.startTime.toLocalDate() }
+        } else {
+            emptyMap()
+        }
 
         var written = 0L
-        (deduplicatedSteps.keys + ohealthSteps.keys + ohealthActiveCalories.keys).toSortedSet().forEach { date ->
+        (deduplicatedSteps.keys + ohealthSteps.keys + ohealthActiveCalories.keys + ohealthTotalCalories.keys)
+            .toSortedSet()
+            .forEach { date ->
             if (!writtenDailyDates.add(date)) return@forEach
             val stepsTotal = deduplicatedSteps[date]?.result
-            val activeOHealth = ohealthActiveCalories[date]?.result
+            val activeCalories = ohealthActiveCalories[date]
+                ?.result
+                ?.get(ActiveCaloriesBurnedRecord.ACTIVE_CALORIES_TOTAL)
+            val totalCaloriesFallback = ohealthTotalCalories[date]
+                ?.result
+                ?.get(TotalCaloriesBurnedRecord.ENERGY_TOTAL)
+            val caloriesOHealth = activeCalories ?: totalCaloriesFallback
+            val calorieRecordType = when {
+                activeCalories != null -> "ActiveCaloriesBurnedRecord"
+                totalCaloriesFallback != null -> "TotalCaloriesBurnedRecord"
+                else -> null
+            }
             writer.writeJsonLine(
                 jsonObject(
                     "kind" to "daily_activity",
                     "date" to date.toString(),
                     "stepsTotalDeduplicated" to stepsTotal?.get(StepsRecord.COUNT_TOTAL),
                     "stepsOHealth" to ohealthSteps[date]?.result?.get(StepsRecord.COUNT_TOTAL),
-                    "activeCaloriesOHealthKcal" to activeOHealth
-                        ?.get(ActiveCaloriesBurnedRecord.ACTIVE_CALORIES_TOTAL)
-                        ?.inKilocalories,
+                    "caloriesOHealthKcal" to caloriesOHealth?.inKilocalories,
+                    "caloriesOHealthRecordType" to calorieRecordType,
                     "stepsTotalSourcePackages" to stepsTotal?.dataOrigins
                         ?.map { it.packageName }
                         ?.sorted()
                         ?.joinToString(","),
-                    "activeCaloriesOHealthSourcePackages" to activeOHealth?.dataOrigins
-                        ?.map { it.packageName }
-                        ?.sorted()
-                        ?.joinToString(","),
+                    "caloriesOHealthSourcePackage" to if (caloriesOHealth != null) ohealthPackage else null,
                 ),
             )
             reportCollector?.onDailyActivity(
                 date = date,
                 stepsTotal = stepsTotal?.get(StepsRecord.COUNT_TOTAL),
                 stepsOHealth = ohealthSteps[date]?.result?.get(StepsRecord.COUNT_TOTAL),
-                activeCaloriesOHealthKcal = activeOHealth
-                    ?.get(ActiveCaloriesBurnedRecord.ACTIVE_CALORIES_TOTAL)
-                    ?.inKilocalories,
+                caloriesOHealthKcal = caloriesOHealth?.inKilocalories,
             )
             written += 1
         }
@@ -803,7 +827,13 @@ class HealthExportEngine(
         writtenWorkoutEnergyIds: MutableSet<String>,
         reportCollector: ReportCollector?,
     ): Long {
-        if (HealthPermission.getReadPermission(ActiveCaloriesBurnedRecord::class) !in granted) return 0
+        val canReadActiveCalories = HealthPermission.getReadPermission(ActiveCaloriesBurnedRecord::class) in granted
+        val canReadTotalCalories = HealthPermission.getReadPermission(TotalCaloriesBurnedRecord::class) in granted
+        if (!canReadActiveCalories && !canReadTotalCalories) return 0
+        val calorieMetrics = buildSet {
+            if (canReadActiveCalories) add(ActiveCaloriesBurnedRecord.ACTIVE_CALORIES_TOTAL)
+            if (canReadTotalCalories) add(TotalCaloriesBurnedRecord.ENERGY_TOTAL)
+        }
         var count = 0L
         workouts.forEachIndexed { index, workout ->
             val identity = workout.id.ifEmpty { "${workout.start}|${workout.end}" }
@@ -812,7 +842,7 @@ class HealthExportEngine(
                 criticalHealthCall("$label workout calories ${index + 1}/${workouts.size}") {
                     client.aggregate(
                         AggregateRequest(
-                            metrics = setOf(ActiveCaloriesBurnedRecord.ACTIVE_CALORIES_TOTAL),
+                            metrics = calorieMetrics,
                             timeRangeFilter = TimeRangeFilter.between(workout.start, workout.end),
                             dataOriginFilter = setOf(DataOrigin(ohealthPackage)),
                         ),
@@ -820,6 +850,14 @@ class HealthExportEngine(
                 }
             }
             result.exceptionOrNull()?.let { if (it is CancellationException) throw it }
+            val activeCalories = result.getOrNull()?.get(ActiveCaloriesBurnedRecord.ACTIVE_CALORIES_TOTAL)
+            val totalCaloriesFallback = result.getOrNull()?.get(TotalCaloriesBurnedRecord.ENERGY_TOTAL)
+            val caloriesOHealth = activeCalories ?: totalCaloriesFallback
+            val calorieRecordType = when {
+                activeCalories != null -> "ActiveCaloriesBurnedRecord"
+                totalCaloriesFallback != null -> "TotalCaloriesBurnedRecord"
+                else -> null
+            }
             writer.writeJsonLine(
                 jsonObject(
                     "kind" to "workout_energy",
@@ -827,9 +865,8 @@ class HealthExportEngine(
                     "startTime" to workout.start.toString(),
                     "endTime" to workout.end.toString(),
                     "title" to workout.title,
-                    "activeCaloriesOHealthKcal" to result.getOrNull()
-                        ?.get(ActiveCaloriesBurnedRecord.ACTIVE_CALORIES_TOTAL)
-                        ?.inKilocalories,
+                    "caloriesOHealthKcal" to caloriesOHealth?.inKilocalories,
+                    "caloriesOHealthRecordType" to calorieRecordType,
                     "status" to if (result.isSuccess) "complete" else "failed",
                     "message" to result.exceptionOrNull()?.message,
                 ),
@@ -839,9 +876,7 @@ class HealthExportEngine(
                 title = workout.title,
                 startTime = workout.start,
                 endTime = workout.end,
-                caloriesKcal = result.getOrNull()
-                    ?.get(ActiveCaloriesBurnedRecord.ACTIVE_CALORIES_TOTAL)
-                    ?.inKilocalories,
+                caloriesKcal = caloriesOHealth?.inKilocalories,
             )
             count += 1
         }

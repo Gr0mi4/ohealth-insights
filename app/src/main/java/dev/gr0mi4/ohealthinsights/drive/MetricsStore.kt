@@ -10,7 +10,7 @@ data class DailyMetric(
     val date: LocalDate,
     val stepsTotal: Long? = null,
     val stepsOHealth: Long? = null,
-    val activeCaloriesOHealthKcal: Double? = null,
+    val caloriesOHealthKcal: Double? = null,
     val workoutCount: Int = 0,
     val workoutCaloriesKcal: Double? = null,
     val sleepMinutes: Long? = null,
@@ -39,7 +39,7 @@ class MetricsStore(context: android.content.Context) {
                 sleepMinutes = metric.sleepMinutes ?: existing?.sleepMinutes,
                 stepsTotal = metric.stepsTotal ?: existing?.stepsTotal,
                 stepsOHealth = metric.stepsOHealth ?: existing?.stepsOHealth,
-                activeCaloriesOHealthKcal = metric.activeCaloriesOHealthKcal ?: existing?.activeCaloriesOHealthKcal,
+                caloriesOHealthKcal = metric.caloriesOHealthKcal ?: existing?.caloriesOHealthKcal,
                 updatedAt = metric.updatedAt,
             )
             prune(metrics)
@@ -120,7 +120,7 @@ class MetricsStore(context: android.content.Context) {
         put("date", date.toString())
         stepsTotal?.let { put("stepsTotal", it) }
         stepsOHealth?.let { put("stepsOHealth", it) }
-        activeCaloriesOHealthKcal?.let { put("activeCaloriesOHealthKcal", it) }
+        caloriesOHealthKcal?.let { put("caloriesOHealthKcal", it) }
         put("workoutCount", workoutCount)
         workoutCaloriesKcal?.let { put("workoutCaloriesKcal", it) }
         sleepMinutes?.let { put("sleepMinutes", it) }
@@ -131,7 +131,8 @@ class MetricsStore(context: android.content.Context) {
         date = LocalDate.parse(getString("date")),
         stepsTotal = optLongOrNull("stepsTotal"),
         stepsOHealth = optLongOrNull("stepsOHealth"),
-        activeCaloriesOHealthKcal = optDoubleOrNull("activeCaloriesOHealthKcal"),
+        caloriesOHealthKcal = optDoubleOrNull("caloriesOHealthKcal")
+            ?: optDoubleOrNull("activeCaloriesOHealthKcal"),
         workoutCount = optInt("workoutCount", 0),
         workoutCaloriesKcal = optDoubleOrNull("workoutCaloriesKcal"),
         sleepMinutes = optLongOrNull("sleepMinutes"),
@@ -159,14 +160,14 @@ class ReportCollector(
         date: LocalDate,
         stepsTotal: Long?,
         stepsOHealth: Long?,
-        activeCaloriesOHealthKcal: Double?,
+        caloriesOHealthKcal: Double?,
     ) {
         metricsStore.upsertDaily(
             DailyMetric(
                 date = date,
                 stepsTotal = stepsTotal,
                 stepsOHealth = stepsOHealth,
-                activeCaloriesOHealthKcal = activeCaloriesOHealthKcal,
+                caloriesOHealthKcal = caloriesOHealthKcal,
             ),
         )
     }

@@ -12,11 +12,12 @@ This document defines how generated OHealth Insights reports should be interpret
 
 ## Calories
 
-1. `activeCaloriesOHealthKcal` is the only canonical calorie value in generated reports.
-2. It is aggregated from `ActiveCaloriesBurnedRecord` records written by `com.heytap.health.international`.
-3. It excludes basal/resting energy and calorie estimates written by Google Fit or other apps.
-4. Workout calorie values use the same OHealth-only active-calorie source.
-5. A current-day calorie value may be partial when synchronization runs before the local day ends.
+1. `caloriesOHealthKcal` is the only canonical calorie value in generated reports.
+2. It uses `ActiveCaloriesBurnedRecord` records from `com.heytap.health.international` when available.
+3. If OHealth does not publish active-calorie records, it falls back to OHealth-origin `TotalCaloriesBurnedRecord` data.
+4. Data written by Google Fit or other apps is never included.
+5. Workout calorie values use the same OHealth-only preference and fallback.
+6. A current-day calorie value may be partial when synchronization runs before the local day ends.
 
 ## Exercise sessions versus training sessions
 
@@ -64,7 +65,7 @@ User-confirmed ground truth overrides heuristic classification and should be use
 
 ## Report behavior
 
-Generated Markdown/CSV reports should expose a canonical step count based on `stepsOHealth ?: stepsTotal`, while retaining both raw step fields for diagnostics. They should expose only OHealth-origin active calories and must not include cross-source total-calorie aggregates.
+Generated Markdown/CSV reports should expose a canonical step count based on `stepsOHealth ?: stepsTotal`, while retaining both raw step fields for diagnostics. They should expose only OHealth-origin calories and must not include cross-source calorie aggregates.
 
 Until a full semantic classifier is implemented, reports should include this contract (or a concise embedded version) so downstream ChatGPT analysis does not treat raw exercise records as literal workout counts.
 
