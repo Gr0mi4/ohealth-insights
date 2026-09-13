@@ -10,6 +10,14 @@ This document defines how generated OHealth Insights reports should be interpret
 4. A current-day row is partial when the report was exported before that local day ended. Do not compare a partial day directly with completed days without saying so.
 5. When a newly reported value disagrees with an older report for the same date, prefer the newer completed sync and treat the earlier value as a synchronization snapshot rather than a biological/activity change.
 
+## Calories
+
+1. `activeCaloriesOHealthKcal` is the only canonical calorie value in generated reports.
+2. It is aggregated from `ActiveCaloriesBurnedRecord` records written by `com.heytap.health.international`.
+3. It excludes basal/resting energy and calorie estimates written by Google Fit or other apps.
+4. Workout calorie values use the same OHealth-only active-calorie source.
+5. A current-day calorie value may be partial when synchronization runs before the local day ends.
+
 ## Exercise sessions versus training sessions
 
 Health Connect/OHealth exercise records are activity records, not automatically distinct training sessions.
@@ -56,7 +64,7 @@ User-confirmed ground truth overrides heuristic classification and should be use
 
 ## Report behavior
 
-Generated Markdown/CSV reports should expose a canonical step count based on `stepsOHealth ?: stepsTotal`, while retaining both raw step fields for diagnostics.
+Generated Markdown/CSV reports should expose a canonical step count based on `stepsOHealth ?: stepsTotal`, while retaining both raw step fields for diagnostics. They should expose only OHealth-origin active calories and must not include cross-source total-calorie aggregates.
 
 Until a full semantic classifier is implemented, reports should include this contract (or a concise embedded version) so downstream ChatGPT analysis does not treat raw exercise records as literal workout counts.
 

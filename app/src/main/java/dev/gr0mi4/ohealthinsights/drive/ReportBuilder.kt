@@ -31,6 +31,7 @@ class ReportBuilder(
             appendLine("## Analysis contract")
             appendLine()
             appendLine("- Canonical daily steps: `Steps (OHealth)` when present; use `Steps (dedup)` only as an explicit fallback/debug value.")
+            appendLine("- All displayed calories use OHealth-origin `ActiveCaloriesBurnedRecord` data and exclude basal/resting energy and other apps' estimates.")
             appendLine("- A row for the export day may be partial when the sync ran before the local day ended.")
             appendLine("- Raw exercise records are activity records, not automatically separate training sessions.")
             appendLine("- Generic `Workout` may be walking, warm-up/cool-down, or an adjacent fragment; `Freestyle workout` is semantically ambiguous.")
@@ -40,12 +41,12 @@ class ReportBuilder(
             appendLine()
             appendLine("## Last $reportDays days")
             appendLine()
-            appendLine("| Date | Steps (dedup) | Steps (OHealth) | Calories (kcal) | Workouts | Sleep (min) |")
+            appendLine("| Date | Steps (dedup) | Steps (OHealth) | Active kcal (OHealth) | Workouts | Sleep (min) |")
             appendLine("| --- | ---: | ---: | ---: | ---: | ---: |")
             recent.forEach { day ->
                 appendLine(
                     "| ${day.date} | ${day.stepsTotal ?: "—"} | ${day.stepsOHealth ?: "—"} | " +
-                        "${formatDouble(day.totalCaloriesKcal)} | ${day.workoutCount} | " +
+                        "${formatDouble(day.activeCaloriesOHealthKcal)} | ${day.workoutCount} | " +
                         "${day.sleepMinutes ?: "—"} |",
                 )
             }
@@ -75,14 +76,14 @@ class ReportBuilder(
     }
 
     fun buildCsv(reportDays: Int = 90): String = buildString {
-        appendLine("date,steps_total,steps_ohealth,calories_kcal,workout_count,workout_calories_kcal,sleep_minutes")
+        appendLine("date,steps_total,steps_ohealth,active_calories_ohealth_kcal,workout_count,workout_active_calories_ohealth_kcal,sleep_minutes")
         metricsStore.recentDays(reportDays).forEach { day ->
             appendLine(
                 listOf(
                     day.date,
                     day.stepsTotal?.toString() ?: "",
                     day.stepsOHealth?.toString() ?: "",
-                    day.totalCaloriesKcal?.toString() ?: "",
+                    day.activeCaloriesOHealthKcal?.toString() ?: "",
                     day.workoutCount,
                     day.workoutCaloriesKcal?.toString() ?: "",
                     day.sleepMinutes?.toString() ?: "",
