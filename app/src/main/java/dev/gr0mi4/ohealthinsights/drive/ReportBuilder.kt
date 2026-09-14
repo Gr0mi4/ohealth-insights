@@ -31,8 +31,8 @@ class ReportBuilder(
             appendLine("## Analysis contract")
             appendLine()
             appendLine("- Canonical daily steps: `Steps (OHealth)` when present; use `Steps (dedup)` only as an explicit fallback/debug value.")
-            appendLine("- Displayed calories exclude Google Fit and other apps; active calories are preferred and OHealth total calories are used when active records are unavailable.")
-            appendLine("- Total-calorie values include basal energy, and Health Connect derives them from basal metabolic rate when no record exists, so a flat repeated value is resting metabolism rather than measured activity.")
+            appendLine("- Calories are summed from OHealth records only, bucketed by local calendar day, with per-workout summary records dropped so a session is not counted twice. They match the figure the OHealth app shows.")
+            appendLine("- `Covered (min)` is how many minutes of the day carry a calorie record. A low value means the watch was off the wrist, not that the day was inactive; days with very different coverage are not comparable.")
             appendLine("- A row for the export day may be partial when the sync ran before the local day ended.")
             appendLine("- Raw exercise records are activity records, not automatically separate training sessions.")
             appendLine("- Generic `Workout` may be walking, warm-up/cool-down, or an adjacent fragment; `Freestyle workout` is semantically ambiguous.")
@@ -42,13 +42,13 @@ class ReportBuilder(
             appendLine()
             appendLine("## Last $reportDays days")
             appendLine()
-            appendLine("| Date | Steps (dedup) | Steps (OHealth) | Calories (OHealth) | Workouts | Sleep (min) |")
-            appendLine("| --- | ---: | ---: | ---: | ---: | ---: |")
+            appendLine("| Date | Steps (dedup) | Steps (OHealth) | Calories (OHealth) | Covered (min) | Workouts | Sleep (min) |")
+            appendLine("| --- | ---: | ---: | ---: | ---: | ---: | ---: |")
             recent.forEach { day ->
                 appendLine(
                     "| ${day.date} | ${day.stepsTotal ?: "—"} | ${day.stepsOHealth ?: "—"} | " +
-                        "${formatDouble(day.caloriesOHealthKcal)} | ${day.workoutCount} | " +
-                        "${day.sleepMinutes ?: "—"} |",
+                        "${formatDouble(day.caloriesOHealthKcal)} | ${day.caloriesCoveredMinutes ?: "—"} | " +
+                        "${day.workoutCount} | ${day.sleepMinutes ?: "—"} |",
                 )
             }
             if (sessionWorkouts.isNotEmpty()) {
@@ -77,7 +77,7 @@ class ReportBuilder(
     }
 
     fun buildCsv(reportDays: Int = 90): String = buildString {
-        appendLine("date,steps_total,steps_ohealth,calories_ohealth_kcal,workout_count,workout_calories_ohealth_kcal,sleep_minutes")
+        appendLine("date,steps_total,steps_ohealth,calories_ohealth_kcal,calories_covered_minutes,workout_count,workout_calories_ohealth_kcal,sleep_minutes")
         metricsStore.recentDays(reportDays).forEach { day ->
             appendLine(
                 listOf(
@@ -85,6 +85,7 @@ class ReportBuilder(
                     day.stepsTotal?.toString() ?: "",
                     day.stepsOHealth?.toString() ?: "",
                     day.caloriesOHealthKcal?.toString() ?: "",
+                    day.caloriesCoveredMinutes?.toString() ?: "",
                     day.workoutCount,
                     day.workoutCaloriesKcal?.toString() ?: "",
                     day.sleepMinutes?.toString() ?: "",
