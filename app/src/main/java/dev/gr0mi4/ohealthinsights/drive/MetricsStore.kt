@@ -52,8 +52,6 @@ class MetricsStore(context: android.content.Context) {
             metrics[metric.date] = metric.copy(
                 workoutCalories = existing?.workoutCalories ?: emptyMap(),
                 sleepSessionMinutes = existing?.sleepSessionMinutes ?: emptyMap(),
-                workoutCaloriesKcal = metric.workoutCaloriesKcal ?: existing?.workoutCaloriesKcal,
-                sleepMinutes = metric.sleepMinutes ?: existing?.sleepMinutes,
                 stepsTotal = metric.stepsTotal ?: existing?.stepsTotal,
                 stepsOHealth = metric.stepsOHealth ?: existing?.stepsOHealth,
                 caloriesOHealthKcal = metric.caloriesOHealthKcal ?: existing?.caloriesOHealthKcal,
