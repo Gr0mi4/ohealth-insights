@@ -56,6 +56,9 @@ jobs:
           DRIVE_OAUTH_CLIENT_ID=${DRIVE_OAUTH_CLIENT_ID}
           EOF
 
+      - name: Run unit tests
+        run: gradle --no-daemon :app:testDebugUnitTest --stacktrace
+
       - name: Build debug APK
         run: gradle --no-daemon :app:assembleDebug --stacktrace
 
