@@ -147,7 +147,8 @@ class MetricsStoreTest {
         store.upsertDaily(DailyMetric(date = today, stepsOHealth = 12_000))
 
         val leftovers = temporaryFolder.root.listFiles()?.map { it.name }.orEmpty()
-        assertEquals(listOf(MetricsStore.FILE_NAME), leftovers)
+        assertTrue("unexpected leftovers: $leftovers", leftovers.none { it.endsWith(".tmp") })
+        assertTrue(leftovers.contains(MetricsStore.FILE_NAME))
     }
 
     @Test
@@ -158,6 +159,54 @@ class MetricsStoreTest {
 
         val dates = MetricsStore(file).allMetrics().map { it.date }
         assertEquals(listOf(today), dates)
+    }
+
+    @Test
+    fun `a year of history is kept, not a quarter`() {
+        listOf(0L, 120L, 300L, 400L).forEach { back ->
+            store.upsertDaily(DailyMetric(date = today.minusDays(back), stepsOHealth = back))
+        }
+
+        assertEquals(4, MetricsStore(file).allMetrics().size)
+    }
+
+    @Test
+    fun `replacing a value is recorded with what it was`() {
+        store.upsertDaily(DailyMetric(date = today, caloriesOHealthKcal = 820.0))
+        store.upsertDaily(DailyMetric(date = today, caloriesOHealthKcal = 37.0))
+
+        val change = MetricsStore(file).changeLog().single()
+        assertEquals(today, change.date)
+        assertEquals("caloriesOHealthKcal", change.field)
+        assertEquals("820.0", change.before)
+        assertEquals("37.0", change.after)
+    }
+
+    @Test
+    fun `filling in a blank is not a change`() {
+        store.upsertDaily(DailyMetric(date = today, stepsOHealth = 12_000))
+        store.upsertDaily(DailyMetric(date = today, caloriesOHealthKcal = 820.0))
+
+        assertEquals(emptyList<MetricChange>(), MetricsStore(file).changeLog())
+    }
+
+    @Test
+    fun `writing the same value again is not a change`() {
+        repeat(3) { store.upsertDaily(DailyMetric(date = today, caloriesOHealthKcal = 820.0)) }
+
+        assertEquals(emptyList<MetricChange>(), MetricsStore(file).changeLog())
+    }
+
+    @Test
+    fun `changes made inside a batch are written when it commits`() {
+        store.upsertDaily(DailyMetric(date = today, caloriesOHealthKcal = 820.0))
+
+        store.beginBatch()
+        store.upsertDaily(DailyMetric(date = today, caloriesOHealthKcal = 37.0))
+        assertEquals(emptyList<MetricChange>(), MetricsStore(file).changeLog())
+
+        store.commitBatch()
+        assertEquals(1, MetricsStore(file).changeLog().size)
     }
 
     @Test

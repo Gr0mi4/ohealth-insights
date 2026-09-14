@@ -42,6 +42,15 @@ data class DailyMetric(
         get() = sleepAwakenings.values.takeIf { it.isNotEmpty() }?.sum()
 }
 
+/** A day whose stored value was replaced by a different one, and when. */
+data class MetricChange(
+    val changedAt: Instant,
+    val date: LocalDate,
+    val field: String,
+    val before: String,
+    val after: String,
+)
+
 data class WorkoutMetric(
     val sessionId: String,
     val title: String?,
@@ -60,6 +69,7 @@ class MetricsStore(private val file: java.io.File) {
     constructor(context: android.content.Context) :
         this(java.io.File(context.filesDir, FILE_NAME))
 
+    private val changeLogFile = java.io.File(file.parentFile, CHANGE_LOG_FILE_NAME)
     private val lock = Any()
 
     /**
@@ -69,6 +79,7 @@ class MetricsStore(private val file: java.io.File) {
      * three years did that about 2400 times to change one field at a time.
      */
     private var batch: MutableMap<LocalDate, DailyMetric>? = null
+    private val pendingChanges = mutableListOf<MetricChange>()
 
     fun beginBatch() {
         synchronized(lock) {
@@ -83,6 +94,7 @@ class MetricsStore(private val file: java.io.File) {
                 saveAll(metrics)
             }
             batch = null
+            flushChanges()
         }
     }
 
@@ -97,12 +109,66 @@ class MetricsStore(private val file: java.io.File) {
             metrics[date] = transform(metrics[date])
             prune(metrics)
             saveAll(metrics)
+            flushChanges()
         }
     }
 
     private fun read(): Map<LocalDate, DailyMetric> = synchronized(lock) { batch ?: loadAll() }
 
+    /**
+     * Notes a day whose value moved, so an unexpected change can be traced afterwards.
+     *
+     * A sync that wrote 37 kcal over a correct 820 was invisible until the number was noticed by
+     * eye; the old value existed nowhere. Only a value replacing a different one is recorded -
+     * filling in a blank is not a change.
+     */
+    private fun recordChanges(existing: DailyMetric?, incoming: DailyMetric) {
+        if (existing == null) return
+        val at = Instant.now()
+        fun note(field: String, before: Any?, after: Any?) {
+            if (before == null || after == null || before == after) return
+            pendingChanges += MetricChange(at, incoming.date, field, before.toString(), after.toString())
+        }
+        note("stepsTotal", existing.stepsTotal, incoming.stepsTotal)
+        note("stepsOHealth", existing.stepsOHealth, incoming.stepsOHealth)
+        note("caloriesOHealthKcal", existing.caloriesOHealthKcal, incoming.caloriesOHealthKcal)
+        note("caloriesCoveredMinutes", existing.caloriesCoveredMinutes, incoming.caloriesCoveredMinutes)
+    }
+
+    fun changeLog(): List<MetricChange> = synchronized(lock) {
+        if (!changeLogFile.exists()) return emptyList()
+        changeLogFile.readLines()
+            .drop(1)
+            .filter { it.isNotBlank() }
+            .mapNotNull { line ->
+                val parts = line.split(",")
+                if (parts.size < 5) return@mapNotNull null
+                runCatching {
+                    MetricChange(
+                        changedAt = Instant.parse(parts[0]),
+                        date = LocalDate.parse(parts[1]),
+                        field = parts[2],
+                        before = parts[3],
+                        after = parts[4],
+                    )
+                }.getOrNull()
+            }
+    }
+
+    private fun flushChanges() {
+        if (pendingChanges.isEmpty()) return
+        val existing = changeLog()
+        val combined = (existing + pendingChanges).takeLast(MAX_CHANGE_ENTRIES)
+        pendingChanges.clear()
+        val text = buildString {
+            appendLine("changedAt,date,field,before,after")
+            combined.forEach { appendLine("${it.changedAt},${it.date},${it.field},${it.before},${it.after}") }
+        }
+        writeAtomically(changeLogFile, text)
+    }
+
     fun upsertDaily(metric: DailyMetric) = mutate(metric.date) { existing ->
+        recordChanges(existing, metric)
         metric.copy(
             workoutCalories = existing?.workoutCalories ?: emptyMap(),
             timeInBedMinutes = existing?.timeInBedMinutes ?: emptyMap(),
@@ -181,10 +247,14 @@ class MetricsStore(private val file: java.io.File) {
         val array = JSONArray()
         metrics.values.sortedBy { it.date }.forEach { array.put(it.toJson()) }
         json.put("days", array)
-        val temp = java.io.File(file.parentFile, "${file.name}.tmp")
-        temp.writeText(json.toString(2))
-        if (!temp.renameTo(file)) {
-            file.writeText(temp.readText())
+        writeAtomically(file, json.toString(2))
+    }
+
+    private fun writeAtomically(target: java.io.File, text: String) {
+        val temp = java.io.File(target.parentFile, "${target.name}.tmp")
+        temp.writeText(text)
+        if (!temp.renameTo(target)) {
+            target.writeText(temp.readText())
             temp.delete()
         }
     }
@@ -240,8 +310,20 @@ class MetricsStore(private val file: java.io.File) {
         if (has(key) && !isNull(key)) optDouble(key) else null
 
     companion object {
-        const val RETENTION_DAYS = 90
+        /**
+         * Ten years rather than a quarter.
+         *
+         * This was 90 days, which capped the whole point of the project: a full sync computed a row
+         * for every one of 1413 days and then discarded 94% of them on the way to disk, so no
+         * report could compare this September with last. A day costs about 400 bytes, so the entire
+         * history is around half a megabyte - less than the app spends on a single upload.
+         */
+        const val RETENTION_DAYS = 3_650
+
+        /** Enough to cover several years of corrections without the log becoming its own problem. */
+        const val MAX_CHANGE_ENTRIES = 5_000
         const val FILE_NAME = "ohealth_daily_metrics.json"
+        const val CHANGE_LOG_FILE_NAME = "ohealth_metric_changes.csv"
     }
 }
 

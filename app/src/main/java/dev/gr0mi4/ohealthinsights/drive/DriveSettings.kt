@@ -11,12 +11,11 @@ data class DriveSettings(
     val rootFolderName: String = "OHealth Insights",
     val reportsFolderName: String = "Reports",
     val archiveFolderName: String = "Archive",
-    val reportFileTemplate: String = "ohealth-report-{date}.md",
-    val csvFileTemplate: String = "ohealth-metrics-{date}.csv",
     val rawFileTemplate: String = "ohealth-raw-{syncMode}-{timestamp}.ndjson.gz",
     val updateLatestReport: Boolean = true,
-    val latestReportName: String = "ohealth-latest-report.md",
-    val latestCsvName: String = "ohealth-latest-metrics.csv",
+    val latestReportName: String = "ohealth-report.md",
+    val latestCsvName: String = "ohealth-metrics.csv",
+    val changeLogName: String = "ohealth-changes.csv",
     val googleAccountEmail: String? = null,
     val rootFolderId: String? = null,
     val reportsFolderId: String? = null,
@@ -39,10 +38,6 @@ class DriveSettingsStore(context: Context) {
         rootFolderName = prefs.getString(KEY_ROOT_FOLDER, "OHealth Insights") ?: "OHealth Insights",
         reportsFolderName = prefs.getString(KEY_REPORTS_FOLDER, "Reports") ?: "Reports",
         archiveFolderName = prefs.getString(KEY_ARCHIVE_FOLDER, "Archive") ?: "Archive",
-        reportFileTemplate = prefs.getString(KEY_REPORT_TEMPLATE, "ohealth-report-{date}.md")
-            ?: "ohealth-report-{date}.md",
-        csvFileTemplate = prefs.getString(KEY_CSV_TEMPLATE, "ohealth-metrics-{date}.csv")
-            ?: "ohealth-metrics-{date}.csv",
         rawFileTemplate = prefs.getString(
             KEY_RAW_TEMPLATE,
             "ohealth-raw-{syncMode}-{timestamp}.ndjson.gz",
@@ -52,6 +47,8 @@ class DriveSettingsStore(context: Context) {
             ?: "ohealth-latest-report.md",
         latestCsvName = prefs.getString(KEY_LATEST_CSV, "ohealth-latest-metrics.csv")
             ?: "ohealth-latest-metrics.csv",
+        changeLogName = prefs.getString(KEY_CHANGE_LOG, "ohealth-changes.csv")
+            ?: "ohealth-changes.csv",
         googleAccountEmail = prefs.getString(KEY_ACCOUNT_EMAIL, null),
         rootFolderId = prefs.getString(KEY_ROOT_FOLDER_ID, null),
         reportsFolderId = prefs.getString(KEY_REPORTS_FOLDER_ID, null),
@@ -68,12 +65,11 @@ class DriveSettingsStore(context: Context) {
             .putString(KEY_ROOT_FOLDER, settings.rootFolderName)
             .putString(KEY_REPORTS_FOLDER, settings.reportsFolderName)
             .putString(KEY_ARCHIVE_FOLDER, settings.archiveFolderName)
-            .putString(KEY_REPORT_TEMPLATE, settings.reportFileTemplate)
-            .putString(KEY_CSV_TEMPLATE, settings.csvFileTemplate)
             .putString(KEY_RAW_TEMPLATE, settings.rawFileTemplate)
             .putBoolean(KEY_UPDATE_LATEST, settings.updateLatestReport)
             .putString(KEY_LATEST_REPORT, settings.latestReportName)
             .putString(KEY_LATEST_CSV, settings.latestCsvName)
+            .putString(KEY_CHANGE_LOG, settings.changeLogName)
             .putString(KEY_ACCOUNT_EMAIL, settings.googleAccountEmail)
             .putString(KEY_ROOT_FOLDER_ID, settings.rootFolderId)
             .putString(KEY_REPORTS_FOLDER_ID, settings.reportsFolderId)
@@ -125,12 +121,11 @@ class DriveSettingsStore(context: Context) {
         private const val KEY_ROOT_FOLDER = "root_folder_name"
         private const val KEY_REPORTS_FOLDER = "reports_folder_name"
         private const val KEY_ARCHIVE_FOLDER = "archive_folder_name"
-        private const val KEY_REPORT_TEMPLATE = "report_template"
-        private const val KEY_CSV_TEMPLATE = "csv_template"
         private const val KEY_RAW_TEMPLATE = "raw_template"
         private const val KEY_UPDATE_LATEST = "update_latest"
         private const val KEY_LATEST_REPORT = "latest_report_name"
         private const val KEY_LATEST_CSV = "latest_csv_name"
+        private const val KEY_CHANGE_LOG = "change_log_name"
         private const val KEY_ACCOUNT_EMAIL = "account_email"
         private const val KEY_ROOT_FOLDER_ID = "root_folder_id"
         private const val KEY_REPORTS_FOLDER_ID = "reports_folder_id"
@@ -160,19 +155,17 @@ data class NamingContext(
 }
 
 fun DriveSettings.withResolvedNames(context: NamingContext): ResolvedDriveNames = ResolvedDriveNames(
-    reportFileName = context.apply(reportFileTemplate),
-    csvFileName = context.apply(csvFileTemplate),
     rawFileName = context.apply(rawFileTemplate),
     latestReportName = latestReportName,
     latestCsvName = latestCsvName,
+    changeLogName = changeLogName,
 )
 
 data class ResolvedDriveNames(
-    val reportFileName: String,
-    val csvFileName: String,
     val rawFileName: String,
     val latestReportName: String,
     val latestCsvName: String,
+    val changeLogName: String,
 )
 
 data class DriveConnectionCheck(
