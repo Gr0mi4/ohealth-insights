@@ -33,6 +33,7 @@ class ReportBuilder(
             appendLine("- Canonical daily steps: `Steps (OHealth)` when present; use `Steps (dedup)` only as an explicit fallback/debug value.")
             appendLine("- Calories are summed from OHealth records only, bucketed by local calendar day, with per-workout summary records dropped so a session is not counted twice. They match the figure the OHealth app shows.")
             appendLine("- `Covered (min)` is how many minutes of the day carry a calorie record. A low value means the watch was off the wrist, not that the day was inactive; days with very different coverage are not comparable.")
+            appendLine("- `Sleep (min)` excludes awake stages inside the night; when Health Connect carries no stages the full time-in-bed window is used instead and reads higher.")
             appendLine("- A row for the export day may be partial when the sync ran before the local day ended.")
             appendLine("- Raw exercise records are activity records, not automatically separate training sessions.")
             appendLine("- Generic `Workout` may be walking, warm-up/cool-down, or an adjacent fragment; `Freestyle workout` is semantically ambiguous.")

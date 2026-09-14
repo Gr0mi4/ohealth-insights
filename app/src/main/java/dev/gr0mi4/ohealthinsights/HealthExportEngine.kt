@@ -279,19 +279,32 @@ class HealthExportEngine(
             )
         }
 
+        // A type that dies mid-pagination leaves a hole in this export. Advancing the cursor would
+        // hide that hole forever, because an incremental sync only revisits records that change
+        // after the cursor, and the skipped ones never will. Holding the checkpoint back instead
+        // sends the next run through overlap recovery, which re-reads the range.
+        val checkpointHeldBack = !diagnostic && states.values.any { it.error != null }
+
         EngineExportResult(
             rawRecordCount = states.values.sumOf { it.count },
             derivedRecordCount = derivedCount,
             nonEmptyTypes = states.values.count { it.count > 0 },
             syncMode = plan.mode.wireName,
             rangeCount = plan.ranges.size,
-            checkpointToken = if (diagnostic) null else plan.nextChangesToken,
-            checkpointTime = if (diagnostic) null else exportedAt,
+            checkpointToken = if (diagnostic || checkpointHeldBack) null else plan.nextChangesToken,
+            checkpointTime = when {
+                diagnostic -> null
+                checkpointHeldBack -> previousSuccessfulExport
+                else -> exportedAt
+            },
             warnings = buildList {
                 states.forEach { (recordType, state) ->
                     state.error?.let { add("$recordType: ${it.message ?: it.javaClass.simpleName}") }
                 }
-                if (!diagnostic && plan.nextChangesToken == null) {
+                if (checkpointHeldBack) {
+                    add("Checkpoint held back after a read failure; the next sync re-reads this range.")
+                }
+                if (!diagnostic && !checkpointHeldBack && plan.nextChangesToken == null) {
                     add("Incremental cursor unavailable; the next sync will use a $fallbackOverlapDays-day overlap.")
                 }
                 slowStages.maxByOrNull { it.durationMillis }?.let { timing ->
@@ -612,7 +625,12 @@ class HealthExportEngine(
             onRecord = { record ->
                 if (record is SleepSessionRecord) {
                     sleeps += TimeWindow(record.startTime, record.endTime)
-                    reportCollector?.onSleepSession(record.startTime, record.endTime)
+                    reportCollector?.onSleepSession(
+                        sessionId = record.metadata.id,
+                        startTime = record.startTime,
+                        endTime = record.endTime,
+                        actualSleepMinutes = actualSleepMinutes(record),
+                    )
                 }
             },
         )
@@ -908,6 +926,26 @@ class HealthExportEngine(
         } else {
             instant.atZone(ZoneId.systemDefault()).toLocalDate()
         }
+
+    /**
+     * Minutes actually spent asleep, excluding awake stages inside the session window.
+     *
+     * The session window is time in bed, which is what the previous report counted and why it read
+     * higher than the OHealth app. When Health Connect carries no stages there is no honest way to
+     * recover the asleep duration, so this returns null and the caller keeps the window instead.
+     */
+    private fun actualSleepMinutes(record: SleepSessionRecord): Long? {
+        val asleepStages = record.stages.filter { stage ->
+            stage.stage == SleepSessionRecord.STAGE_TYPE_SLEEPING ||
+                stage.stage == SleepSessionRecord.STAGE_TYPE_LIGHT ||
+                stage.stage == SleepSessionRecord.STAGE_TYPE_DEEP ||
+                stage.stage == SleepSessionRecord.STAGE_TYPE_REM
+        }
+        if (asleepStages.isEmpty()) return null
+        return asleepStages.sumOf { stage ->
+            ChronoUnit.SECONDS.between(stage.startTime, stage.endTime).coerceAtLeast(0)
+        } / 60
+    }
 
     private fun dailyAggregationWindows(
         start: LocalDateTime,

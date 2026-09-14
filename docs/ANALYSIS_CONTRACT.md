@@ -33,6 +33,14 @@ This document defines how generated OHealth Insights reports should be interpret
    figure must never be read as a sedentary day.
 9. A current-day calorie value may be partial when synchronization runs before the local day ends.
 
+## Sleep
+
+1. `sleepMinutes` is time actually asleep: awake stages inside the session window are excluded, which
+   is what the OHealth app shows.
+2. When Health Connect carries no stages for a session, the full time-in-bed window is used instead.
+   That value reads higher than the app and is not comparable with staged nights.
+3. Sessions are keyed by record id, so a night re-read by two overlapping ranges is counted once.
+
 ## Exercise sessions versus training sessions
 
 Health Connect/OHealth exercise records are activity records, not automatically distinct training sessions.

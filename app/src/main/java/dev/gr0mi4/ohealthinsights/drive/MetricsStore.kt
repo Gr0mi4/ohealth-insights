@@ -222,10 +222,16 @@ class ReportCollector(
         metricsStore.addWorkout(date, workout)
     }
 
-    fun onSleepSession(startTime: Instant, endTime: Instant) {
-        val minutes = ChronoUnit.MINUTES.between(startTime, endTime).coerceAtLeast(0)
+    fun onSleepSession(
+        sessionId: String,
+        startTime: Instant,
+        endTime: Instant,
+        actualSleepMinutes: Long?,
+    ) {
+        val timeInBed = ChronoUnit.MINUTES.between(startTime, endTime).coerceAtLeast(0)
         val date = endTime.atZone(zone).toLocalDate()
-        metricsStore.addSleepSession(date, "$startTime|$endTime", minutes)
+        val key = sessionId.ifEmpty { "$startTime|$endTime" }
+        metricsStore.addSleepSession(date, key, actualSleepMinutes ?: timeInBed)
     }
 
     fun sessionWorkouts(): List<WorkoutMetric> = sessionWorkouts.toList()
