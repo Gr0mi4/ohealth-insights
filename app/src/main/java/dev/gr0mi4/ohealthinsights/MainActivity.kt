@@ -776,13 +776,13 @@ class MainActivity : ComponentActivity() {
         fun clear() = entries.clear()
 
         private companion object {
-        private const val UI_PREFS = "ohealth_ui"
-        private const val KEY_NOTIFICATION_ASKED = "notification_permission_asked"
             const val maxEntries = 500
         }
     }
 
     companion object {
+        private const val UI_PREFS = "ohealth_ui"
+        private const val KEY_NOTIFICATION_ASKED = "notification_permission_asked"
         private const val healthConnectProviderPackage = "com.google.android.apps.healthdata"
         private const val progressRefreshMillis = 500L
         private const val visibleStageCount = 6
