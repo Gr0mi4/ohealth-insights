@@ -41,9 +41,8 @@ class DriveClient(
             resumable = rawFile.length() > MULTIPART_LIMIT_BYTES,
         ).also { uploaded += names.rawFileName }
 
-        // A daily sync uploads a full export every day and nothing ever removed them, so the folder
-        // grew without limit in the user's own Drive. Trimmed after the upload, never before, so a
-        // failed upload cannot cost an older export.
+        // Nothing ever removed an export, so the folder grew without limit in the user's own Drive.
+        // Trimmed after the upload, never before, so a failed upload cannot cost an older export.
         onProgress("Trimming Archive")
         runCatching { trimFolder(archiveId, keep = ARCHIVE_KEEP) }
 
@@ -239,17 +238,28 @@ class DriveClient(
         return JSONObject(execute(request))
     }
 
-    /** Removes all but the [keep] most recent files in a folder, oldest first. */
+    /**
+     * Rotates the incremental exports, keeping the [keep] most recent, and never touches a full one.
+     *
+     * The files in here are not equivalent. An incremental export holds only what changed since the
+     * last checkpoint - a day's worth, and the next full sync reproduces it from Health Connect. An
+     * initial or diagnostic export is a complete snapshot of everything at that moment, which is the
+     * only record of what the data looked like before a source app revised or removed it. Rotating
+     * by age alone would evict exactly those first.
+     */
     private fun trimFolder(parentId: String, keep: Int) {
         val files = listFiles(
             query = "'${escapeQuery(parentId)}' in parents and trashed=false",
             fields = "files(id,name,createdTime)",
             orderBy = "createdTime desc",
         )
-        files.drop(keep).forEach { file ->
-            runCatching { deleteFile(file.getString("id")) }
-        }
+        files.filterNot { isFullExport(it.optString("name")) }
+            .drop(keep)
+            .forEach { file -> runCatching { deleteFile(file.getString("id")) } }
     }
+
+    private fun isFullExport(name: String): Boolean =
+        FULL_EXPORT_MARKERS.any { name.contains(it) }
 
     private fun deleteFile(fileId: String) {
         val request = Request.Builder()
@@ -337,8 +347,11 @@ class DriveClient(
     companion object {
         private const val BASE = "https://www.googleapis.com/drive/v3"
 
-        /** Roughly two months of daily exports; older ones have never been useful to go back to. */
+        /** Roughly two months of incremental exports; a full sync reproduces anything older. */
         private const val ARCHIVE_KEEP = 60
+
+        /** Sync modes whose export is a complete snapshot, and so is never rotated away. */
+        private val FULL_EXPORT_MARKERS = listOf("initial_compact", "full_diagnostic")
         private const val UPLOAD = "https://www.googleapis.com/upload/drive/v3/files"
         private val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
         private const val MULTIPART_LIMIT_BYTES = 5L * 1024 * 1024
