@@ -1359,7 +1359,12 @@ class HealthExportEngine(
         private const val dailyAggregationChunkDays = 45L
         private const val windowLookbackMinutes = 60L
         private const val fallbackOverlapDays = 7L
-        private const val maxTrackedRecordIds = 250_000
+        // Sized for the overlap between ranges, not for the export. Ranges advance in order, a
+        // session reaches at most a day back and a recovery at most seven, so the window that can
+        // legitimately be re-read is a few thousand records. A 938k-record diagnostic export
+        // produced no duplicate ids at all, while the set itself retained roughly 33 MB of heap in
+        // UUID strings alongside the sample buffers.
+        private const val maxTrackedRecordIds = 50_000
         private const val maxChangesPages = 200
         private const val maxAffectedDaysPerRecord = 400
         private const val maxSlowStages = 40
