@@ -15,10 +15,16 @@ This document defines how generated OHealth Insights reports should be interpret
    for every day in a window, empty ones included, so rows once existed for dates predating the
    watch. Absence of a measurement is never reported as a zero: a row exists only when something
    was actually recorded, and a field is blank rather than 0 when that particular thing was not.
-5. `weight_kg` carries the day's weight, preferring an OHealth reading and otherwise taking whichever
-   source measured it. Weight is a scale reading rather than a derived aggregate, so mixing sources
-   risks only a disagreement between scales, not the double counting that made calories unusable.
-6. `Archive/` holds the raw exports plus three generations of the metrics file, roughly a day, a
+5. `weight_kg` carries the day's weight. Weight is the one signal OHealth is not the source for: it
+   holds two days in eighteen months, while the scale in actual use reports through Google Fit every
+   few days. Google Fit therefore wins a day and OHealth fills the days it does not cover. A scale
+   reading cannot be double counted or synthesised the way calories were, so mixing sources risks
+   only a disagreement between scales.
+6. `day_complete` is false for a row covering a day that had not ended when it was written - today,
+   or a day whose last sync ran before midnight and was never revisited. Such a row holds part of a
+   day. Never compare it with completed days as if it were one, and never read a low value there as
+   a quiet day.
+7. `Archive/` holds the raw exports plus three generations of the metrics file, roughly a day, a
    week and a month old.
 
 ## Daily steps

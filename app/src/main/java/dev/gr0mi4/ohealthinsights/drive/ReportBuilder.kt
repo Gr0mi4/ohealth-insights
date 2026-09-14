@@ -35,7 +35,7 @@ class ReportBuilder(
             appendLine("- `Covered (min)` is how many minutes of the day carry a calorie record. A low value means the watch was off the wrist, not that the day was inactive; days with very different coverage are not comparable.")
             appendLine("- `In bed (min)` is time in bed, not time asleep: OHealth subtracts the awake segments it marks in its own app, and Health Connect never receives them. Expect it to read a few minutes above the watch.")
             appendLine("- `Wake (est)` is an estimate of night-time awakenings from heart rate alone. Use it for whether a night was settled or broken, never as sleep staging or as a count to report literally.")
-            appendLine("- A row for the export day may be partial when the sync ran before the local day ended.")
+            appendLine("- `day_complete` is false for a row covering a day that had not ended when it was written. Such a row holds part of a day and must never be compared with completed days as if it were one.")
             appendLine("- Raw exercise records are activity records, not automatically separate training sessions.")
             appendLine("- Generic `Workout` may be walking, warm-up/cool-down, or an adjacent fragment; `Freestyle workout` is semantically ambiguous.")
             appendLine("- Classify ambiguous sessions using duration, kcal/min, HR/HR zones, steps/step rate, distance, overlap/adjacency, context, and user-confirmed ground truth.")
@@ -87,11 +87,12 @@ class ReportBuilder(
      * comparison can come from.
      */
     fun buildCsv(): String = buildString {
-        appendLine("date,steps_total,steps_ohealth,calories_ohealth_kcal,calories_covered_minutes,workout_count,workout_calories_ohealth_kcal,time_in_bed_minutes,awakenings_estimated,weight_kg")
+        appendLine("date,day_complete,steps_total,steps_ohealth,calories_ohealth_kcal,calories_covered_minutes,workout_count,workout_calories_ohealth_kcal,time_in_bed_minutes,awakenings_estimated,weight_kg")
         metricsStore.allMetrics().forEach { day ->
             appendLine(
                 listOf(
                     day.date,
+                    day.isComplete(),
                     day.stepsTotal?.toString() ?: "",
                     day.stepsOHealth?.toString() ?: "",
                     day.caloriesOHealthKcal?.toString() ?: "",

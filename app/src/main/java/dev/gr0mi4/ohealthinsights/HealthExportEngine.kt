@@ -666,11 +666,13 @@ class HealthExportEngine(
                 onRecord = { record ->
                     if (record is WeightRecord) {
                         val date = HealthMetrics.localDateOf(record.time, record.zoneOffset)
-                        // OHealth wins the day when it measured one; otherwise any scale is better
-                        // than a blank, and most recent readings come from elsewhere.
-                        val fromOHealth =
-                            record.metadata.dataOrigin.packageName == ohealthPackage
-                        if (fromOHealth || date !in weights) {
+                        // Weight is the one signal OHealth is not the source for: it holds two days
+                        // in eighteen months, while the scale that actually gets used reports
+                        // through Google Fit every few days. Google Fit therefore wins the day, and
+                        // OHealth fills the days it does not cover.
+                        val preferred =
+                            record.metadata.dataOrigin.packageName == googleFitPackage
+                        if (preferred || date !in weights) {
                             weights[date] = record.weight.inKilograms
                         }
                     }
@@ -1527,6 +1529,7 @@ class HealthExportEngine(
 
         private const val logTag = "OHealthExport"
         private const val ohealthPackage = "com.heytap.health.international"
+        private const val googleFitPackage = "com.google.android.apps.fitness"
         private const val readPageSize = 1_000
 
         // Calorie records are per-minute, so a month holds around ten thousand of them. Read in

@@ -236,6 +236,32 @@ class MetricsStoreTest {
     }
 
     @Test
+    fun `a row written during the day it describes is not complete`() {
+        val row = DailyMetric(date = today, updatedAt = Instant.now())
+
+        assertFalse(row.isComplete())
+    }
+
+    @Test
+    fun `a row written after its day ended is complete`() {
+        val row = DailyMetric(date = today.minusDays(1), updatedAt = Instant.now())
+
+        assertTrue(row.isComplete())
+    }
+
+    @Test
+    fun `a day whose last sync ran before midnight stays incomplete`() {
+        // Synced at noon and never revisited: the row holds half a day, whatever the date is now.
+        val day = today.minusDays(3)
+        val row = DailyMetric(
+            date = day,
+            updatedAt = day.atTime(12, 0).atZone(java.time.ZoneId.systemDefault()).toInstant(),
+        )
+
+        assertFalse(row.isComplete())
+    }
+
+    @Test
     fun `weight survives a round trip`() {
         store.upsertDaily(DailyMetric(date = today, weightKilograms = 78.4))
 
