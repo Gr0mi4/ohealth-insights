@@ -4,7 +4,6 @@ import java.io.File
 import java.io.IOException
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
-import java.time.Duration
 import java.time.Instant
 import java.util.concurrent.TimeUnit
 import okhttp3.MediaType.Companion.toMediaType
@@ -235,47 +234,36 @@ class DriveClient(
         return JSONObject(execute(request))
     }
 
-    /**
-     * Keeps three generations of the metrics file: about a day, a week and a month old.
-     *
-     * Refreshed by age rather than on every sync, which is the whole point. Snapshotting each time
-     * would copy a bad write into all three within three syncs; ageing them out means the monthly
-     * copy predates anything noticed within a month. Promotion runs oldest first so no generation
-     * is skipped, and each copy is made before the older one is removed.
-     */
+    /** Executes the rotation [SnapshotRotation] decided on; the decision itself is tested there. */
     private fun rotateSnapshots(archiveId: String, currentCsv: String) {
         val present = listFiles(
             query = "'${escapeQuery(archiveId)}' in parents and trashed=false",
             fields = "files(id,name,modifiedTime)",
         ).associateBy { it.optString("name") }
 
-        val now = Instant.now()
-        fun ageDays(name: String): Long? = present[name]?.optString("modifiedTime")
-            ?.takeIf { it.isNotBlank() }
-            ?.let { runCatching { Duration.between(Instant.parse(it), now).toDays() }.getOrNull() }
-
-        fun due(name: String, days: Long): Boolean = (ageDays(name) ?: Long.MAX_VALUE) >= days
-
-        if (due(SNAPSHOT_MONTHLY, 30)) {
-            present[SNAPSHOT_WEEKLY]?.let { source ->
-                copyFile(source.getString("id"), SNAPSHOT_MONTHLY, archiveId)
-                present[SNAPSHOT_MONTHLY]?.let { runCatching { deleteFile(it.getString("id")) } }
-            }
+        val modifiedAt = SnapshotRotation.slots.associateWith { slot ->
+            present[slot]?.optString("modifiedTime")
+                ?.takeIf { it.isNotBlank() }
+                ?.let { runCatching { Instant.parse(it) }.getOrNull() }
         }
-        if (due(SNAPSHOT_WEEKLY, 7)) {
-            present[SNAPSHOT_DAILY]?.let { source ->
-                copyFile(source.getString("id"), SNAPSHOT_WEEKLY, archiveId)
-                present[SNAPSHOT_WEEKLY]?.let { runCatching { deleteFile(it.getString("id")) } }
+
+        SnapshotRotation.plan(Instant.now(), modifiedAt).forEach { action ->
+            when (action) {
+                is SnapshotRotation.Action.Promote -> {
+                    val source = present[action.from] ?: return@forEach
+                    // Copy before removing, so a failure leaves the older generation intact.
+                    copyFile(source.getString("id"), action.to, archiveId)
+                    present[action.to]?.let { runCatching { deleteFile(it.getString("id")) } }
+                }
+
+                is SnapshotRotation.Action.WriteCurrent -> upsertTextFile(
+                    name = action.to,
+                    mimeType = "text/csv",
+                    parentId = archiveId,
+                    content = currentCsv,
+                    existingFileId = present[action.to]?.getString("id"),
+                )
             }
-        }
-        if (due(SNAPSHOT_DAILY, 1)) {
-            upsertTextFile(
-                name = SNAPSHOT_DAILY,
-                mimeType = "text/csv",
-                parentId = archiveId,
-                content = currentCsv,
-                existingFileId = present[SNAPSHOT_DAILY]?.getString("id"),
-            )
         }
     }
 
@@ -315,8 +303,7 @@ class DriveClient(
     private fun isFullExport(name: String): Boolean =
         FULL_EXPORT_MARKERS.any { name.contains(it) }
 
-    private fun isSnapshot(name: String): Boolean =
-        name == SNAPSHOT_DAILY || name == SNAPSHOT_WEEKLY || name == SNAPSHOT_MONTHLY
+    private fun isSnapshot(name: String): Boolean = name in SnapshotRotation.slots
 
     private fun deleteFile(fileId: String) {
         val request = Request.Builder()
@@ -410,9 +397,7 @@ class DriveClient(
         /** Sync modes whose export is a complete snapshot, and so is never rotated away. */
         private val FULL_EXPORT_MARKERS = listOf("initial_compact", "full_diagnostic")
 
-        private const val SNAPSHOT_DAILY = "ohealth-metrics-daily.csv"
-        private const val SNAPSHOT_WEEKLY = "ohealth-metrics-weekly.csv"
-        private const val SNAPSHOT_MONTHLY = "ohealth-metrics-monthly.csv"
+
         private const val UPLOAD = "https://www.googleapis.com/upload/drive/v3/files"
         private val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
         private const val MULTIPART_LIMIT_BYTES = 5L * 1024 * 1024
