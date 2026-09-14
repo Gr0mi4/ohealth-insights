@@ -134,6 +134,28 @@ internal object HealthMetrics {
     }
 
     /**
+     * The dates a range is entitled to write a daily row for.
+     *
+     * The calorie read deliberately reaches back before the range to cover a workout that started
+     * earlier, and those samples carry their own dates. A row written for such a date held a
+     * fragment of the day and no steps at all - the step aggregation covers only whole local days
+     * of the range - and the fragment then stood, because the date is marked written and the range
+     * that actually covers it skips it. The daily rows must therefore be limited to the whole local
+     * days the range covers, whatever the calorie span reached.
+     */
+    fun dailyDatesWithin(
+        localStart: LocalDateTime,
+        localEnd: LocalDateTime,
+        candidates: Set<LocalDate>,
+    ): List<LocalDate> {
+        val first = localStart.toLocalDate()
+        val endExclusive = localEnd.toLocalDate()
+        return candidates
+            .filter { !it.isBefore(first) && it.isBefore(endExclusive) }
+            .sorted()
+    }
+
+    /**
      * OHealth counts the last minute of a session as its end rather than the minute after it, so a
      * session it displays as 23:11-01:12 arrives ending at 01:13.
      */

@@ -605,7 +605,13 @@ class HealthExportEngine(
             writtenRecordIds = writtenRecordIds,
             predicate = { record -> record is ExerciseSessionRecord && overlaps(record, range) },
             onRecord = { record ->
-                if (record is ExerciseSessionRecord) {
+                // Derived figures take OHealth sessions only. Google Fit writes around a hundred
+                // untitled sessions of its own from activity detection, and counting those as
+                // workouts both inflated the workout count and credited them OHealth calories.
+                // The records themselves are still exported, for every source.
+                if (record is ExerciseSessionRecord &&
+                    record.metadata.dataOrigin.packageName == ohealthPackage
+                ) {
                     workouts += SessionWindow(
                         id = record.metadata.id,
                         start = record.startTime,
@@ -826,8 +832,11 @@ class HealthExportEngine(
         val caloriesByDate = calories.samples.groupBy { it.localDate }
 
         var written = 0L
-        (deduplicatedSteps.keys + ohealthSteps.keys + caloriesByDate.keys)
-            .toSortedSet()
+        HealthMetrics.dailyDatesWithin(
+            localStart = localStart,
+            localEnd = localEnd,
+            candidates = deduplicatedSteps.keys + ohealthSteps.keys + caloriesByDate.keys,
+        )
             .forEach { date ->
             if (!writtenDailyDates.add(date)) return@forEach
             val stepsTotal = deduplicatedSteps[date]?.result

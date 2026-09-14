@@ -110,3 +110,88 @@ class SessionSummaryTest {
         assertEquals("2026-09-12T00:00", end.toString())
     }
 }
+
+/**
+ * The regression that produced a 37 kcal row for a day the sync never covered.
+ *
+ * A workout starting the previous day pulled the calorie read back past the range, those samples
+ * carried the previous day's date, and a daily row was written from them alone: a fragment of the
+ * day with no steps. The date was then marked written, so the range that actually covered it never
+ * produced a row, and the fragment overwrote the correct figure in the report.
+ */
+class DailyRowRangeTest {
+
+    private val zone = java.time.ZoneId.of("Europe/Warsaw")
+
+    /** A range covering only 2026-09-11 in local time. */
+    private val range = TimeWindow(
+        start = Instant.parse("2026-09-10T22:00:00Z"),
+        end = Instant.parse("2026-09-11T22:00:00Z"),
+    )
+
+    private fun datesFor(vararg candidates: String): List<java.time.LocalDate> {
+        val (localStart, localEnd) = HealthMetrics.localDayBounds(range, zone)
+        return HealthMetrics.dailyDatesWithin(
+            localStart = localStart,
+            localEnd = localEnd,
+            candidates = candidates.map(java.time.LocalDate::parse).toSet(),
+        )
+    }
+
+    @Test
+    fun `a date dragged in from before the range is not written`() {
+        assertEquals(listOf(java.time.LocalDate.parse("2026-09-11")), datesFor("2026-09-10", "2026-09-11"))
+    }
+
+    @Test
+    fun `a date after the range is not written either`() {
+        assertEquals(listOf(java.time.LocalDate.parse("2026-09-11")), datesFor("2026-09-11", "2026-09-12"))
+    }
+
+    @Test
+    fun `the days the range does cover are all written`() {
+        val wide = TimeWindow(
+            start = Instant.parse("2026-09-10T22:00:00Z"),
+            end = Instant.parse("2026-09-13T22:00:00Z"),
+        )
+        val (localStart, localEnd) = HealthMetrics.localDayBounds(wide, zone)
+
+        val dates = HealthMetrics.dailyDatesWithin(
+            localStart = localStart,
+            localEnd = localEnd,
+            candidates = setOf(
+                java.time.LocalDate.parse("2026-09-09"),
+                java.time.LocalDate.parse("2026-09-11"),
+                java.time.LocalDate.parse("2026-09-12"),
+                java.time.LocalDate.parse("2026-09-13"),
+                java.time.LocalDate.parse("2026-09-14"),
+            ),
+        )
+
+        assertEquals(
+            listOf("2026-09-11", "2026-09-12", "2026-09-13").map(java.time.LocalDate::parse),
+            dates,
+        )
+    }
+
+    @Test
+    fun `dates come back in order`() {
+        val wide = TimeWindow(
+            start = Instant.parse("2026-09-10T22:00:00Z"),
+            end = Instant.parse("2026-09-13T22:00:00Z"),
+        )
+        val (localStart, localEnd) = HealthMetrics.localDayBounds(wide, zone)
+
+        val dates = HealthMetrics.dailyDatesWithin(
+            localStart = localStart,
+            localEnd = localEnd,
+            candidates = setOf(
+                java.time.LocalDate.parse("2026-09-13"),
+                java.time.LocalDate.parse("2026-09-11"),
+                java.time.LocalDate.parse("2026-09-12"),
+            ),
+        )
+
+        assertEquals(dates.sorted(), dates)
+    }
+}
