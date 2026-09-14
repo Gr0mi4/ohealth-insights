@@ -172,11 +172,13 @@ class MetricsStoreTest {
 
     @Test
     fun `replacing a value is recorded with what it was`() {
-        store.upsertDaily(DailyMetric(date = today, caloriesOHealthKcal = 820.0))
-        store.upsertDaily(DailyMetric(date = today, caloriesOHealthKcal = 37.0))
+        // A finished day: the current one moves as it goes and is deliberately not logged.
+        val yesterday = today.minusDays(1)
+        store.upsertDaily(DailyMetric(date = yesterday, caloriesOHealthKcal = 820.0))
+        store.upsertDaily(DailyMetric(date = yesterday, caloriesOHealthKcal = 37.0))
 
         val change = MetricsStore(file).changeLog().single()
-        assertEquals(today, change.date)
+        assertEquals(yesterday, change.date)
         assertEquals("caloriesOHealthKcal", change.field)
         assertEquals("820.0", change.before)
         assertEquals("37.0", change.after)
@@ -184,25 +186,28 @@ class MetricsStoreTest {
 
     @Test
     fun `filling in a blank is not a change`() {
-        store.upsertDaily(DailyMetric(date = today, stepsOHealth = 12_000))
-        store.upsertDaily(DailyMetric(date = today, caloriesOHealthKcal = 820.0))
+        val yesterday = today.minusDays(1)
+        store.upsertDaily(DailyMetric(date = yesterday, stepsOHealth = 12_000))
+        store.upsertDaily(DailyMetric(date = yesterday, caloriesOHealthKcal = 820.0))
 
         assertEquals(emptyList<MetricChange>(), MetricsStore(file).changeLog())
     }
 
     @Test
     fun `writing the same value again is not a change`() {
-        repeat(3) { store.upsertDaily(DailyMetric(date = today, caloriesOHealthKcal = 820.0)) }
+        val yesterday = today.minusDays(1)
+        repeat(3) { store.upsertDaily(DailyMetric(date = yesterday, caloriesOHealthKcal = 820.0)) }
 
         assertEquals(emptyList<MetricChange>(), MetricsStore(file).changeLog())
     }
 
     @Test
     fun `changes made inside a batch are written when it commits`() {
-        store.upsertDaily(DailyMetric(date = today, caloriesOHealthKcal = 820.0))
+        val yesterday = today.minusDays(1)
+        store.upsertDaily(DailyMetric(date = yesterday, caloriesOHealthKcal = 820.0))
 
         store.beginBatch()
-        store.upsertDaily(DailyMetric(date = today, caloriesOHealthKcal = 37.0))
+        store.upsertDaily(DailyMetric(date = yesterday, caloriesOHealthKcal = 37.0))
         assertEquals(emptyList<MetricChange>(), MetricsStore(file).changeLog())
 
         store.commitBatch()
