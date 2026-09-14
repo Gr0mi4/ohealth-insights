@@ -41,20 +41,30 @@ class DriveClient(
             resumable = rawFile.length() > MULTIPART_LIMIT_BYTES,
         ).also { uploaded += names.rawFileName }
 
+        // A daily sync uploads a full export every day and nothing ever removed them, so the folder
+        // grew without limit in the user's own Drive. Trimmed after the upload, never before, so a
+        // failed upload cannot cost an older export.
+        onProgress("Trimming Archive")
+        runCatching { trimFolder(archiveId, keep = ARCHIVE_KEEP) }
+
+        // Replace rather than create: Drive allows several files of the same name in a folder, so
+        // two syncs on one day left two dated reports with no way to tell which was current.
         onProgress("Uploading dated report")
-        uploadTextFile(
+        upsertTextFile(
             name = names.reportFileName,
             mimeType = "text/markdown",
             parentId = reportsId,
             content = reportMarkdown,
+            existingFileId = null,
         ).also { uploaded += names.reportFileName }
 
         onProgress("Uploading dated metrics CSV")
-        uploadTextFile(
+        upsertTextFile(
             name = names.csvFileName,
             mimeType = "text/csv",
             parentId = reportsId,
             content = csvContent,
+            existingFileId = null,
         ).also { uploaded += names.csvFileName }
 
         var latestReportId: String? = null
@@ -229,15 +239,42 @@ class DriveClient(
         return JSONObject(execute(request))
     }
 
+    /** Removes all but the [keep] most recent files in a folder, oldest first. */
+    private fun trimFolder(parentId: String, keep: Int) {
+        val files = listFiles(
+            query = "'${escapeQuery(parentId)}' in parents and trashed=false",
+            fields = "files(id,name,createdTime)",
+            orderBy = "createdTime desc",
+        )
+        files.drop(keep).forEach { file ->
+            runCatching { deleteFile(file.getString("id")) }
+        }
+    }
+
+    private fun deleteFile(fileId: String) {
+        val request = Request.Builder()
+            .url("$BASE/files/$fileId")
+            .delete()
+            .header("Authorization", authHeader())
+            .build()
+        execute(request)
+    }
+
     private fun findFileByName(name: String, parentId: String): JSONObject? {
         val query = "name='${escapeQuery(name)}' and '$parentId' in parents and trashed=false"
         return listFiles(query).firstOrNull()
     }
 
-    private fun listFiles(query: String): List<JSONObject> {
+    private fun listFiles(
+        query: String,
+        fields: String = "files(id,name,mimeType)",
+        orderBy: String? = null,
+    ): List<JSONObject> {
         val encoded = URLEncoder.encode(query, StandardCharsets.UTF_8)
+        val encodedFields = URLEncoder.encode(fields, StandardCharsets.UTF_8)
+        val order = orderBy?.let { "&orderBy=" + URLEncoder.encode(it, StandardCharsets.UTF_8) }.orEmpty()
         val request = Request.Builder()
-            .url("$BASE/files?q=$encoded&spaces=drive&fields=files(id,name,mimeType)")
+            .url("$BASE/files?q=$encoded&spaces=drive&fields=$encodedFields&pageSize=1000$order")
             .get()
             .header("Authorization", authHeader())
             .build()
@@ -299,6 +336,9 @@ class DriveClient(
 
     companion object {
         private const val BASE = "https://www.googleapis.com/drive/v3"
+
+        /** Roughly two months of daily exports; older ones have never been useful to go back to. */
+        private const val ARCHIVE_KEEP = 60
         private const val UPLOAD = "https://www.googleapis.com/upload/drive/v3/files"
         private val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
         private const val MULTIPART_LIMIT_BYTES = 5L * 1024 * 1024
