@@ -59,10 +59,8 @@ import java.io.File
 import java.time.Instant
 import java.time.LocalDate
 import java.time.LocalDateTime
-import java.time.Duration
 import java.time.Period
 import java.time.ZoneId
-import java.time.ZoneOffset
 import java.time.temporal.ChronoUnit
 import java.util.TreeSet
 import java.util.zip.GZIPOutputStream
@@ -732,7 +730,7 @@ class HealthExportEngine(
         // views of the same deduplicated records, and cannot disagree. Workouts are included in the
         // span because a session may start before the first local day this range covers.
         val zone = ZoneId.systemDefault()
-        val (localStart, localEnd) = localDayBounds(range, zone)
+        val (localStart, localEnd) = HealthMetrics.localDayBounds(range, zone)
         val calorieStart = (workouts.map { it.start } + localStart.atZone(zone).toInstant()).min()
         val calorieEnd = (workouts.map { it.end } + localEnd.atZone(zone).toInstant()).max()
         val calories = readOHealthCalories(
@@ -745,7 +743,7 @@ class HealthExportEngine(
 
         var derived = 0L
         sleepSessions.forEach { session ->
-            val awakenings = estimateAwakenings(session, heartRate)
+            val awakenings = HealthMetrics.estimateAwakenings(session, heartRate)
             reportCollector?.onSleepSession(
                 sessionId = session.id,
                 startTime = session.start,
@@ -792,7 +790,7 @@ class HealthExportEngine(
         if (!canReadSteps && calories.samples.isEmpty()) return 0
 
         val zone = ZoneId.systemDefault()
-        val (localStart, localEnd) = localDayBounds(range, zone)
+        val (localStart, localEnd) = HealthMetrics.localDayBounds(range, zone)
         val windows = dailyAggregationWindows(localStart, localEnd)
         val deduplicatedSteps = if (canReadSteps) {
             windows.flatMapIndexed { index, window ->
@@ -900,13 +898,13 @@ class HealthExportEngine(
                     CalorieSample(
                         start = it.startTime,
                         end = it.endTime,
-                        localDate = localDateOf(it.startTime, it.startZoneOffset),
+                        localDate = HealthMetrics.localDateOf(it.startTime, it.startZoneOffset),
                         kilocalories = it.energy.inKilocalories,
                     )
                 }
             }
             if (active.isNotEmpty()) {
-                return CalorieSamples(dropSummaryDuplicates(active), "ActiveCaloriesBurnedRecord")
+                return CalorieSamples(HealthMetrics.dropSummaryDuplicates(active), "ActiveCaloriesBurnedRecord")
             }
         }
         if (canReadTotal) {
@@ -920,13 +918,13 @@ class HealthExportEngine(
                     CalorieSample(
                         start = it.startTime,
                         end = it.endTime,
-                        localDate = localDateOf(it.startTime, it.startZoneOffset),
+                        localDate = HealthMetrics.localDateOf(it.startTime, it.startZoneOffset),
                         kilocalories = it.energy.inKilocalories,
                     )
                 }
             }
             if (total.isNotEmpty()) {
-                return CalorieSamples(dropSummaryDuplicates(total), "TotalCaloriesBurnedRecord")
+                return CalorieSamples(HealthMetrics.dropSummaryDuplicates(total), "TotalCaloriesBurnedRecord")
             }
         }
         return CalorieSamples(emptyList(), null)
@@ -961,92 +959,6 @@ class HealthExportEngine(
         return samples
     }
 
-    /**
-     * Drops any record whose span strictly contains another record's span.
-     *
-     * OHealth emits one summary record per workout alongside the per-minute records covering the
-     * same window; keeping both double-counts the session.
-     */
-    private fun dropSummaryDuplicates(samples: List<CalorieSample>): List<CalorieSample> {
-        if (samples.size < 2) return samples
-        val ordered = samples.sortedWith(
-            compareBy<CalorieSample> { it.start }.thenByDescending { it.end },
-        )
-        val kept = ArrayList<CalorieSample>(ordered.size)
-        ordered.forEachIndexed { index, candidate ->
-            val candidateLength = Duration.between(candidate.start, candidate.end)
-            var containsAnother = false
-            var probe = index + 1
-            while (probe < ordered.size && ordered[probe].start < candidate.end) {
-                val other = ordered[probe]
-                if (!other.end.isAfter(candidate.end) &&
-                    Duration.between(other.start, other.end) < candidateLength
-                ) {
-                    containsAnother = true
-                    break
-                }
-                probe += 1
-            }
-            if (!containsAnother) kept += candidate
-        }
-        return kept
-    }
-
-    private fun localDateOf(instant: Instant, offset: ZoneOffset?): LocalDate =
-        if (offset != null) {
-            instant.atOffset(offset).toLocalDate()
-        } else {
-            instant.atZone(ZoneId.systemDefault()).toLocalDate()
-        }
-
-    /**
-     * Estimated count of night-time awakenings, from heart rate alone.
-     *
-     * OHealth marks awake segments in its own app and subtracts them from the night, but Health
-     * Connect receives `stages=[]` for every session, so the segmentation is simply not exported.
-     * Heart rate is the only remaining signal, and at roughly one sample every two minutes a short
-     * awakening shows up as one to three slightly raised readings - a few beats above the night's
-     * own baseline, not a spike. This therefore returns an estimate that tracks whether a night was
-     * settled or broken; it cannot reproduce the app's figure and must not be presented as sleep
-     * staging.
-     *
-     * The opening and closing minutes are ignored because falling asleep and waking always raise
-     * heart rate and would otherwise be counted on every night.
-     */
-    private fun estimateAwakenings(session: SessionWindow, samples: List<HeartRateSample>): Int? {
-        val core = samples.filter { sample ->
-            !sample.time.isBefore(session.start.plus(sleepEdgeMinutes, ChronoUnit.MINUTES)) &&
-                sample.time.isBefore(session.end.minus(sleepEdgeMinutes, ChronoUnit.MINUTES))
-        }
-        if (core.size < minimumSleepSamples) return null
-        val baseline = core.map { it.beatsPerMinute }.sorted()[core.size / 2]
-        val threshold = baseline + awakeningBeatsAboveBaseline
-        var awakenings = 0
-        var previousElevated: Instant? = null
-        core.sortedBy { it.time }.forEach { sample ->
-            if (sample.beatsPerMinute < threshold) return@forEach
-            val previous = previousElevated
-            if (previous == null ||
-                ChronoUnit.MINUTES.between(previous, sample.time) > awakeningGapMinutes
-            ) {
-                awakenings += 1
-            }
-            previousElevated = sample.time
-        }
-        return awakenings
-    }
-
-    /**
-     * One line per night carrying what this data can actually answer.
-     *
-     * There are no sleep stages and no HRV in the export, so the shape of the nocturnal heart rate
-     * curve - how low it went and how quickly - plus oxygen dips and breathing rate are the whole of
-     * the available evidence. Writing them here means a downstream reader gets a dozen numbers per
-     * night instead of several thousand samples it would have to reduce itself.
-     */
-    private fun SessionWindow.covers(time: Instant): Boolean =
-        !time.isBefore(start) && !time.isAfter(end)
-
     private fun writeSleepSummary(
         writer: BufferedWriter,
         session: SessionWindow,
@@ -1055,31 +967,26 @@ class HealthExportEngine(
         respiratory: List<TimedValue>,
         awakenings: Int?,
     ) {
-        val hr = heartRate.filter { session.covers(it.time) }.sortedBy { it.time }
-        val spo2 = oxygen.filter { session.covers(it.time) }
-        val breathing = respiratory.filter { session.covers(it.time) }
-        val lowest = hr.minByOrNull { it.beatsPerMinute }
+        val summary = HealthMetrics.sleepSummary(session, heartRate, oxygen, respiratory)
         writer.writeJsonLine(
             jsonObject(
                 "kind" to "sleep_summary",
                 "sleepSessionId" to session.id,
                 "startTime" to session.start.toString(),
                 "endTime" to session.end.toString(),
-                "timeInBedMinutes" to
-                    (ChronoUnit.MINUTES.between(session.start, session.end) - 1).coerceAtLeast(0),
-                "heartRateSamples" to hr.size,
-                "heartRateMinBpm" to lowest?.beatsPerMinute,
-                "heartRateAvgBpm" to hr.map { it.beatsPerMinute }.averageOrNull()?.rounded(),
-                "minutesToLowestHeartRate" to
-                    lowest?.let { ChronoUnit.MINUTES.between(session.start, it.time) },
+                "timeInBedMinutes" to summary.timeInBedMinutes,
+                "heartRateSamples" to summary.heartRateSamples,
+                "heartRateMinBpm" to summary.heartRateMinBpm,
+                "heartRateAvgBpm" to summary.heartRateAvgBpm,
+                "minutesToLowestHeartRate" to summary.minutesToLowestHeartRate,
                 "awakeningsEstimated" to awakenings,
-                "oxygenSamples" to spo2.size,
-                "oxygenMinPercent" to spo2.minOfOrNull { it.value }?.rounded(),
-                "oxygenAvgPercent" to spo2.map { it.value }.averageOrNull()?.rounded(),
-                "oxygenSamplesBelow92" to spo2.count { it.value < 92.0 },
-                "oxygenSamplesBelow90" to spo2.count { it.value < 90.0 },
-                "respiratorySamples" to breathing.size,
-                "respiratoryAvgRate" to breathing.map { it.value }.averageOrNull()?.rounded(),
+                "oxygenSamples" to summary.oxygenSamples,
+                "oxygenMinPercent" to summary.oxygenMinPercent,
+                "oxygenAvgPercent" to summary.oxygenAvgPercent,
+                "oxygenSamplesBelow92" to summary.oxygenSamplesBelow92,
+                "oxygenSamplesBelow90" to summary.oxygenSamplesBelow90,
+                "respiratorySamples" to summary.respiratorySamples,
+                "respiratoryAvgRate" to summary.respiratoryAvgRate,
             ),
         )
     }
@@ -1089,8 +996,7 @@ class HealthExportEngine(
         workout: SessionWindow,
         heartRate: List<HeartRateSample>,
     ): Boolean {
-        val hr = heartRate.filter { workout.covers(it.time) }
-        if (hr.isEmpty()) return false
+        val summary = HealthMetrics.workoutHeartRate(workout, heartRate) ?: return false
         writer.writeJsonLine(
             jsonObject(
                 "kind" to "workout_heart_rate",
@@ -1098,22 +1004,13 @@ class HealthExportEngine(
                 "startTime" to workout.start.toString(),
                 "endTime" to workout.end.toString(),
                 "title" to workout.title,
-                "heartRateSamples" to hr.size,
-                "heartRateMinBpm" to hr.minOf { it.beatsPerMinute },
-                "heartRateAvgBpm" to hr.map { it.beatsPerMinute }.averageOrNull()?.rounded(),
-                "heartRateMaxBpm" to hr.maxOf { it.beatsPerMinute },
+                "heartRateSamples" to summary.samples,
+                "heartRateMinBpm" to summary.minBpm,
+                "heartRateAvgBpm" to summary.avgBpm,
+                "heartRateMaxBpm" to summary.maxBpm,
             ),
         )
         return true
-    }
-
-    private fun localDayBounds(range: TimeWindow, zone: ZoneId): Pair<LocalDateTime, LocalDateTime> {
-        val start = LocalDateTime.ofInstant(range.start, zone).toLocalDate().atStartOfDay()
-        val end = LocalDateTime.ofInstant(range.end.minusNanos(1), zone)
-            .toLocalDate()
-            .plusDays(1)
-            .atStartOfDay()
-        return start to end
     }
 
     private fun dailyAggregationWindows(
@@ -1144,9 +1041,7 @@ class HealthExportEngine(
             if (!writtenWorkoutEnergyIds.add(identity)) return@forEach
             // Containment is applied here rather than left to the time-range filter, whose handling
             // of records overlapping the session edges would otherwise decide the figure.
-            val samples = calories.samples.filter {
-                !it.start.isBefore(workout.start) && !it.end.isAfter(workout.end)
-            }
+            val samples = HealthMetrics.caloriesWithin(workout, calories.samples)
             val caloriesOHealthKcal = if (samples.isEmpty()) null else samples.sumOf { it.kilocalories }
             writer.writeJsonLine(
                 jsonObject(
@@ -1414,46 +1309,9 @@ class HealthExportEngine(
         val time: java.lang.reflect.Method?,
     )
 
-    private data class TimeWindow(
-        val start: Instant,
-        val end: Instant,
-    )
-
-    private data class TimedValue(
-        val time: Instant,
-        val value: Double,
-    )
-
-    private data class HeartRateSample(
-        val time: Instant,
-        val beatsPerMinute: Long,
-    )
-
-    private data class CalorieSample(
-        val start: Instant,
-        val end: Instant,
-        val localDate: LocalDate,
-        val kilocalories: Double,
-    ) {
-        val minutes: Long
-            get() = Duration.between(start, end).toMinutes().coerceAtLeast(1L)
-    }
-
-    private data class CalorieSamples(
-        val samples: List<CalorieSample>,
-        val recordType: String?,
-    )
-
     private data class LocalWindow(
         val start: LocalDateTime,
         val end: LocalDateTime,
-    )
-
-    private data class SessionWindow(
-        val id: String,
-        val start: Instant,
-        val end: Instant,
-        val title: String? = null,
     )
 
     private data class StageTiming(
@@ -1484,17 +1342,10 @@ class HealthExportEngine(
         private const val ohealthPackage = "com.heytap.health.international"
         private const val readPageSize = 1_000
 
-        // Awakening estimation. The threshold is deliberately low: measured nights sit within a few
-        // beats of their own baseline, so a conventional spike rule would report nothing at all.
-        // Chosen from the data: 79% of samples read 97% or above, and everything of interest sits
-        // below 96%, which is also where a desaturation passes on its way down and back up.
+        // Chosen from the data: 79% of oxygen samples read 97% or above, and everything of interest
+        // sits below 96%, which is also where a desaturation passes on its way down and back up.
         private const val oxygenDetailBelowPercent = 96.0
         private const val oxygenReferenceMinutes = 10L
-
-        private const val sleepEdgeMinutes = 10L
-        private const val minimumSleepSamples = 20
-        private const val awakeningBeatsAboveBaseline = 6
-        private const val awakeningGapMinutes = 6L
         private const val rangeChunkDays = 30L
         private const val dailyAggregationChunkDays = 45L
         private const val windowLookbackMinutes = 60L
@@ -1596,11 +1447,6 @@ private fun BufferedWriter.writeJsonLine(value: String) {
     write(value)
     newLine()
 }
-
-private fun Collection<Number>.averageOrNull(): Double? =
-    if (isEmpty()) null else sumOf { it.toDouble() } / size
-
-private fun Double.rounded(): Double = Math.round(this * 10.0) / 10.0
 
 private fun jsonObject(vararg fields: Pair<String, Any?>): String = fields.joinToString(
     prefix = "{",

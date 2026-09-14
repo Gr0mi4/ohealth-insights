@@ -2,6 +2,7 @@ package dev.gr0mi4.ohealthinsights.drive
 
 import java.time.Instant
 import java.time.LocalDate
+import dev.gr0mi4.ohealthinsights.HealthMetrics
 import java.time.temporal.ChronoUnit
 import org.json.JSONArray
 import org.json.JSONObject
@@ -284,10 +285,7 @@ class ReportCollector(
         endTime: Instant,
         awakenings: Int?,
     ) {
-        // OHealth counts the last minute of a session as its end rather than the minute after it,
-        // so a session it displays as 23:11-01:12 arrives here ending at 01:13. Matching that
-        // convention keeps every interval identical to the one shown on the watch.
-        val timeInBed = (ChronoUnit.MINUTES.between(startTime, endTime) - 1).coerceAtLeast(0)
+        val timeInBed = HealthMetrics.timeInBedMinutes(startTime, endTime)
         val date = endTime.atZone(zone).toLocalDate()
         val key = sessionId.ifEmpty { "$startTime|$endTime" }
         metricsStore.addSleepSession(date, key, timeInBed, awakenings)
