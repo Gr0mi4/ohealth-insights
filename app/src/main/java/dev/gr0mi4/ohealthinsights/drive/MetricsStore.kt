@@ -50,8 +50,16 @@ data class WorkoutMetric(
     val caloriesKcal: Double?,
 )
 
-class MetricsStore(context: android.content.Context) {
-    private val file = java.io.File(context.filesDir, "ohealth_daily_metrics.json")
+/**
+ * Takes the file rather than a Context so the storage behaviour can be exercised directly. Two
+ * defects have lived in here - counters that grew on every replay, and a write that truncated the
+ * file in place - and neither was reachable by a test while this class needed an Android Context.
+ */
+class MetricsStore(private val file: java.io.File) {
+
+    constructor(context: android.content.Context) :
+        this(java.io.File(context.filesDir, FILE_NAME))
+
     private val lock = Any()
 
     /**
@@ -233,6 +241,7 @@ class MetricsStore(context: android.content.Context) {
 
     companion object {
         const val RETENTION_DAYS = 90
+        const val FILE_NAME = "ohealth_daily_metrics.json"
     }
 }
 

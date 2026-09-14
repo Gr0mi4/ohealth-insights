@@ -17,7 +17,19 @@ class AutoSyncWorker(
 
     override suspend fun doWork(): Result {
         val context = applicationContext
-        if (blockingPrecondition(context) != null) return Result.success()
+        when (val precondition = precondition(context)) {
+            // The user turned this off. Nothing to report.
+            is Precondition.Disabled -> return Result.success()
+
+            // Retrying will not help - someone has to grant something - but staying silent left
+            // automatic sync reporting success while doing nothing, every day, indefinitely.
+            is Precondition.NeedsAttention -> {
+                SyncNotifications.notifyBlocked(context, precondition.reason)
+                return Result.success()
+            }
+
+            Precondition.Ready -> Unit
+        }
 
         val outcome = SyncCoordinator(context).run(
             client = HealthConnectClient.getOrCreate(context),
@@ -62,24 +74,40 @@ class AutoSyncWorker(
             Result.failure()
         }
 
-    /** Returns why this run cannot proceed, or null when everything is in place. */
-    private suspend fun blockingPrecondition(context: Context): String? {
-        if (HealthConnectClient.getSdkStatus(context) != HealthConnectClient.SDK_AVAILABLE) {
-            return "Health Connect is unavailable"
-        }
+    /**
+     * Whether this run can proceed, separating a switch the user turned off from something that
+     * needs their attention. The distinction is the point: both used to return a bare success.
+     */
+    private sealed interface Precondition {
+        data object Ready : Precondition
+
+        data class Disabled(val reason: String) : Precondition
+
+        data class NeedsAttention(val reason: String) : Precondition
+    }
+
+    private suspend fun precondition(context: Context): Precondition {
         val settings = DriveSettingsStore(context).load()
-        if (!settings.autoSyncEnabled) return "Automatic sync is disabled"
-        if (!settings.autoUploadEnabled) return "Drive auto-upload is disabled"
-        if (!settings.driveAuthorizationGranted) return "Drive is not authorized"
-        if (!SyncStateStore(context).hasCheckpoint()) return "First full sync must run from the app"
+        if (!settings.autoSyncEnabled) return Precondition.Disabled("Automatic sync is disabled")
+        if (!settings.autoUploadEnabled) return Precondition.Disabled("Drive auto-upload is disabled")
+
+        if (HealthConnectClient.getSdkStatus(context) != HealthConnectClient.SDK_AVAILABLE) {
+            return Precondition.NeedsAttention("Health Connect is unavailable on this device.")
+        }
+        if (!settings.driveAuthorizationGranted) {
+            return Precondition.NeedsAttention("Google Drive access was lost. Reconnect it to resume uploads.")
+        }
+        if (!SyncStateStore(context).hasCheckpoint()) {
+            return Precondition.NeedsAttention("Run a full sync from the app once; daily sync continues from there.")
+        }
 
         val granted = runCatching {
             HealthConnectClient.getOrCreate(context).permissionController.getGrantedPermissions()
         }.getOrDefault(emptySet())
         if (HealthExportEngine.backgroundPermission !in granted) {
-            return "Background read access is not granted"
+            return Precondition.NeedsAttention("Background read access is not granted, so sync cannot run on its own.")
         }
-        return null
+        return Precondition.Ready
     }
 
     private companion object {

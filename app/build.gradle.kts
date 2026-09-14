@@ -14,8 +14,8 @@ val localProperties = Properties().apply {
 
 // The one place the version is declared. The launcher icon is generated from this value, so the
 // icon on the home screen always names the build that is actually installed.
-val appVersionCode = 24
-val appVersionName = "0.7.1"
+val appVersionCode = 25
+val appVersionName = "0.7.2"
 
 val launcherIconOutputDir: Provider<Directory> =
     layout.buildDirectory.dir("generated/res/launcherIcon")
@@ -93,6 +93,8 @@ android {
 
 dependencies {
     testImplementation("junit:junit:4.13.2")
+    // android.jar's org.json is a stub that throws; unit tests need a real implementation.
+    testImplementation("org.json:json:20250107")
     implementation("androidx.activity:activity-ktx:1.10.1")
     implementation("androidx.core:core-ktx:1.16.0")
     implementation("androidx.health.connect:connect-client:1.1.0")

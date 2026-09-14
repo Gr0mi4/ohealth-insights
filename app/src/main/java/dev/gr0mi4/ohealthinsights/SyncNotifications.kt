@@ -38,11 +38,26 @@ object SyncNotifications {
         )
     }
 
+    /**
+     * A run that could not start at all. Returning success without saying so left automatic sync
+     * quietly doing nothing every day for as long as the condition lasted.
+     */
+    fun notifyBlocked(context: Context, reason: String) {
+        show(
+            context = context,
+            id = BLOCKED_ID,
+            title = "Automatic sync cannot run",
+            text = reason,
+            target = Intent(context, MainActivity::class.java),
+        )
+    }
+
     fun clearAll(context: Context) {
         if (!canNotify(context)) return
         NotificationManagerCompat.from(context).apply {
             cancel(FAILURE_ID)
             cancel(RECONNECT_ID)
+            cancel(BLOCKED_ID)
         }
     }
 
@@ -88,4 +103,5 @@ object SyncNotifications {
     private const val CHANNEL_ID = "ohealth_sync"
     private const val FAILURE_ID = 1001
     private const val RECONNECT_ID = 1002
+    private const val BLOCKED_ID = 1003
 }
