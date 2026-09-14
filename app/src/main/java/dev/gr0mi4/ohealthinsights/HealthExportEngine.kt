@@ -940,6 +940,17 @@ class HealthExportEngine(
         return CalorieSamples(emptyList(), null)
     }
 
+    /**
+     * Reads one calorie type over the span, a few days at a time.
+     *
+     * Reading a thirty-day span in one query took thirteen minutes for ten thousand records - about
+     * twenty records a second, far slower than the same volume read as a series of short windows.
+     * Paging appears to re-run the query for each page, so the ninth page pays for skipping the
+     * eight before it. Short windows finish in one page and never reach that behaviour.
+     *
+     * Records are attributed to the window their start falls in, so a record spanning a boundary is
+     * returned by both queries but kept once.
+     */
     private suspend fun readCalorieRecords(
         type: KClass<out Record>,
         start: Instant,
@@ -948,24 +959,36 @@ class HealthExportEngine(
         toSample: (Record) -> CalorieSample?,
     ): List<CalorieSample> {
         val samples = mutableListOf<CalorieSample>()
-        var pageToken: String? = null
-        var page = 1
-        do {
-            val response = criticalHealthCall("$label page $page (${samples.size} read)") {
-                client.readRecords(
-                    ReadRecordsRequest(
-                        recordType = type,
-                        timeRangeFilter = TimeRangeFilter.between(start, end),
-                        dataOriginFilter = setOf(DataOrigin(ohealthPackage)),
-                        pageSize = readPageSize,
-                        pageToken = pageToken,
-                    ),
-                )
-            }
-            response.records.forEach { record -> toSample(record)?.let(samples::add) }
-            pageToken = response.pageToken
-            page += 1
-        } while (pageToken != null)
+        val windows = generateSequence(start) { previous ->
+            previous.plus(calorieChunkDays, ChronoUnit.DAYS).takeIf { it < end }
+        }.toList()
+        windows.forEachIndexed { index, windowStart ->
+            val windowEnd = minOf(windowStart.plus(calorieChunkDays, ChronoUnit.DAYS), end)
+            var pageToken: String? = null
+            var page = 1
+            do {
+                val response = criticalHealthCall(
+                    "$label ${index + 1}/${windows.size} page $page (${samples.size} read)",
+                ) {
+                    client.readRecords(
+                        ReadRecordsRequest(
+                            recordType = type,
+                            timeRangeFilter = TimeRangeFilter.between(windowStart, windowEnd),
+                            dataOriginFilter = setOf(DataOrigin(ohealthPackage)),
+                            pageSize = calorieReadPageSize,
+                            pageToken = pageToken,
+                        ),
+                    )
+                }
+                response.records.forEach { record ->
+                    val sample = toSample(record) ?: return@forEach
+                    if (sample.start < windowStart || !sample.start.isBefore(windowEnd)) return@forEach
+                    samples += sample
+                }
+                pageToken = response.pageToken
+                page += 1
+            } while (pageToken != null)
+        }
         return samples
     }
 
@@ -1478,6 +1501,12 @@ class HealthExportEngine(
         private const val ohealthPackage = "com.heytap.health.international"
         private const val readPageSize = 1_000
 
+        // Calorie records are per-minute, so a month holds around ten thousand of them. Read in
+        // short windows with a large page so each query returns in one page: paging a long span
+        // degraded badly, apparently re-running the query for every page.
+        private const val calorieChunkDays = 3L
+        private const val calorieReadPageSize = 5_000
+
         // Chosen from the data: 79% of oxygen samples read 97% or above, and everything of interest
         // sits below 96%, which is also where a desaturation passes on its way down and back up.
         private const val oxygenDetailBelowPercent = 96.0
@@ -1497,7 +1526,9 @@ class HealthExportEngine(
         private const val maxSlowStages = 40
         private const val slowStageMillis = 5_000L
         private const val changesTokenTimeoutMillis = 15_000L
-        private const val healthCallTimeoutMillis = 60_000L
+        // Covers a bulk read, not just a hung call: a page of several thousand records is legitimate
+        // work, and a phone that dozes mid-call resumes against a wall clock that kept running.
+        private const val healthCallTimeoutMillis = 180_000L
         val defaultHistoryStartDate: LocalDate = LocalDate.of(2025, 4, 1)
         private val temporalAccessorCache = mutableMapOf<Class<*>, TemporalAccessors>()
 
