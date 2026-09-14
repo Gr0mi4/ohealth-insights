@@ -50,7 +50,7 @@ The default export is a compact, gzip-compressed synchronization stream:
 - Later syncs use a Health Connect changes token and export only affected dates, updates, and deletion identifiers.
 - The checkpoint is stored on-device only after a successful save or Drive upload, preventing gaps after a cancelled or failed transfer.
 - If a changes token expires, the app performs a bounded recovery from the previous successful export instead of silently skipping data.
-- Heart rate is retained only when associated with an exercise or sleep session.
+- Heart rate is read inside exercise and sleep sessions and written as per-session summaries rather than raw samples; the full diagnostic export still carries the samples.
 - Steps are represented as one deduplicated Health Connect total and one OHealth total per day.
 - Calories are summed from OHealth-origin records per local day and per exercise session, with workout summary records dropped so sessions are not double-counted; the figure matches the OHealth app. Health Connect aggregation is not used because it substitutes basal-rate energy for uncovered minutes.
 - Sleep-associated oxygen saturation and respiratory rate remain granular.

@@ -151,7 +151,7 @@ class HealthExportEngine(
                     "registeredRecordTypes" to recordTypes.size,
                     "permittedRecordTypes" to permittedTypes.size,
                     "rangeCount" to plan.ranges.size,
-                    "heartRatePolicy" to "workout_or_sleep_windows",
+                    "heartRatePolicy" to if (diagnostic) "raw_in_session_windows" else "summarised_per_session",
                     "stepsPolicy" to "daily_deduplicated_and_ohealth",
                     "caloriesPolicy" to "ohealth_records_local_day_summary_deduplicated",
                     "compression" to "gzip",
@@ -589,7 +589,9 @@ class HealthExportEngine(
         val workouts = mutableListOf<SessionWindow>()
         val sleeps = mutableListOf<TimeWindow>()
         val sleepSessions = mutableListOf<SessionWindow>()
-        val sleepHeartRate = mutableListOf<HeartRateSample>()
+        val heartRate = mutableListOf<HeartRateSample>()
+        val sleepOxygen = mutableListOf<TimedValue>()
+        val sleepRespiratory = mutableListOf<TimedValue>()
         // Sessions that started before the range still belong to it, so look one day further back.
         val expandedStart = range.start.minus(1, ChronoUnit.DAYS)
 
@@ -657,6 +659,12 @@ class HealthExportEngine(
 
         // Reading these inside session windows only is what keeps a full-history sync finite:
         // continuous heart rate over months is far too large to read and filter afterwards.
+        //
+        // Heart rate is read but not written. A full history carries 1.2 million samples, roughly
+        // half of every record in the export, and a downstream model cannot do anything with a
+        // million time/bpm pairs except spend its context on them. The per-session summaries below
+        // carry what is actually answerable from this data. The diagnostic export still writes the
+        // samples, which is where they belong.
         exportRecordTypeInWindows(
             writer = writer,
             spec = heartRateSpec,
@@ -665,13 +673,10 @@ class HealthExportEngine(
             granted = granted,
             states = states,
             writtenRecordIds = writtenRecordIds,
+            writeRecords = false,
             onRecord = { record ->
                 if (record is HeartRateRecord) {
-                    record.samples.forEach { sample ->
-                        if (sleepSessions.any { !sample.time.isBefore(it.start) && !sample.time.isAfter(it.end) }) {
-                            sleepHeartRate += HeartRateSample(sample.time, sample.beatsPerMinute)
-                        }
-                    }
+                    record.samples.forEach { heartRate += HeartRateSample(it.time, it.beatsPerMinute) }
                 }
             },
         )
@@ -683,6 +688,11 @@ class HealthExportEngine(
             granted = granted,
             states = states,
             writtenRecordIds = writtenRecordIds,
+            onRecord = { record ->
+                if (record is OxygenSaturationRecord) {
+                    sleepOxygen += TimedValue(record.time, record.percentage.value)
+                }
+            },
         )
         exportRecordTypeInWindows(
             writer = writer,
@@ -692,6 +702,11 @@ class HealthExportEngine(
             granted = granted,
             states = states,
             writtenRecordIds = writtenRecordIds,
+            onRecord = { record ->
+                if (record is RespiratoryRateRecord) {
+                    sleepRespiratory += TimedValue(record.time, record.rate)
+                }
+            },
         )
 
         // Read once for the whole range: the daily totals and the per-workout figures are then two
@@ -709,16 +724,24 @@ class HealthExportEngine(
             canReadTotal = HealthPermission.getReadPermission(TotalCaloriesBurnedRecord::class) in granted,
         )
 
+        var derived = 0L
         sleepSessions.forEach { session ->
+            val awakenings = estimateAwakenings(session, heartRate)
             reportCollector?.onSleepSession(
                 sessionId = session.id,
                 startTime = session.start,
                 endTime = session.end,
-                awakenings = estimateAwakenings(session, sleepHeartRate),
+                awakenings = awakenings,
             )
+            writeSleepSummary(writer, session, heartRate, sleepOxygen, sleepRespiratory, awakenings)
+            derived += 1
         }
+        workouts.forEach { workout ->
+            if (writeWorkoutHeartRate(writer, workout, heartRate)) derived += 1
+        }
+        writer.flush()
 
-        var derived = exportDailyActivity(
+        derived += exportDailyActivity(
             writer = writer,
             range = range,
             label = label,
@@ -994,6 +1017,77 @@ class HealthExportEngine(
         return awakenings
     }
 
+    /**
+     * One line per night carrying what this data can actually answer.
+     *
+     * There are no sleep stages and no HRV in the export, so the shape of the nocturnal heart rate
+     * curve - how low it went and how quickly - plus oxygen dips and breathing rate are the whole of
+     * the available evidence. Writing them here means a downstream reader gets a dozen numbers per
+     * night instead of several thousand samples it would have to reduce itself.
+     */
+    private fun SessionWindow.covers(time: Instant): Boolean =
+        !time.isBefore(start) && !time.isAfter(end)
+
+    private fun writeSleepSummary(
+        writer: BufferedWriter,
+        session: SessionWindow,
+        heartRate: List<HeartRateSample>,
+        oxygen: List<TimedValue>,
+        respiratory: List<TimedValue>,
+        awakenings: Int?,
+    ) {
+        val hr = heartRate.filter { session.covers(it.time) }.sortedBy { it.time }
+        val spo2 = oxygen.filter { session.covers(it.time) }
+        val breathing = respiratory.filter { session.covers(it.time) }
+        val lowest = hr.minByOrNull { it.beatsPerMinute }
+        writer.writeJsonLine(
+            jsonObject(
+                "kind" to "sleep_summary",
+                "sleepSessionId" to session.id,
+                "startTime" to session.start.toString(),
+                "endTime" to session.end.toString(),
+                "timeInBedMinutes" to
+                    (ChronoUnit.MINUTES.between(session.start, session.end) - 1).coerceAtLeast(0),
+                "heartRateSamples" to hr.size,
+                "heartRateMinBpm" to lowest?.beatsPerMinute,
+                "heartRateAvgBpm" to hr.map { it.beatsPerMinute }.averageOrNull()?.rounded(),
+                "minutesToLowestHeartRate" to
+                    lowest?.let { ChronoUnit.MINUTES.between(session.start, it.time) },
+                "awakeningsEstimated" to awakenings,
+                "oxygenSamples" to spo2.size,
+                "oxygenMinPercent" to spo2.minOfOrNull { it.value }?.rounded(),
+                "oxygenAvgPercent" to spo2.map { it.value }.averageOrNull()?.rounded(),
+                "oxygenSamplesBelow92" to spo2.count { it.value < 92.0 },
+                "oxygenSamplesBelow90" to spo2.count { it.value < 90.0 },
+                "respiratorySamples" to breathing.size,
+                "respiratoryAvgRate" to breathing.map { it.value }.averageOrNull()?.rounded(),
+            ),
+        )
+    }
+
+    private fun writeWorkoutHeartRate(
+        writer: BufferedWriter,
+        workout: SessionWindow,
+        heartRate: List<HeartRateSample>,
+    ): Boolean {
+        val hr = heartRate.filter { workout.covers(it.time) }
+        if (hr.isEmpty()) return false
+        writer.writeJsonLine(
+            jsonObject(
+                "kind" to "workout_heart_rate",
+                "exerciseSessionId" to workout.id,
+                "startTime" to workout.start.toString(),
+                "endTime" to workout.end.toString(),
+                "title" to workout.title,
+                "heartRateSamples" to hr.size,
+                "heartRateMinBpm" to hr.minOf { it.beatsPerMinute },
+                "heartRateAvgBpm" to hr.map { it.beatsPerMinute }.averageOrNull()?.rounded(),
+                "heartRateMaxBpm" to hr.maxOf { it.beatsPerMinute },
+            ),
+        )
+        return true
+    }
+
     private fun localDayBounds(range: TimeWindow, zone: ZoneId): Pair<LocalDateTime, LocalDateTime> {
         val start = LocalDateTime.ofInstant(range.start, zone).toLocalDate().atStartOfDay()
         val end = LocalDateTime.ofInstant(range.end.minusNanos(1), zone)
@@ -1070,6 +1164,7 @@ class HealthExportEngine(
         granted: Set<String>,
         states: Map<String, TypeState>,
         writtenRecordIds: BoundedIdSet,
+        writeRecords: Boolean = true,
         onRecord: (Record) -> Unit = {},
     ) {
         if (HealthPermission.getReadPermission(spec.type) !in granted) return
@@ -1086,6 +1181,7 @@ class HealthExportEngine(
                 states = states,
                 writtenRecordIds = writtenRecordIds,
                 predicate = { record -> overlaps(record, window) },
+                writeRecords = writeRecords,
                 onRecord = onRecord,
             )
         }
@@ -1101,6 +1197,7 @@ class HealthExportEngine(
         states: Map<String, TypeState>,
         writtenRecordIds: BoundedIdSet,
         predicate: (Record) -> Boolean = { true },
+        writeRecords: Boolean = true,
         onRecord: (Record) -> Unit = {},
     ) {
         val permission = HealthPermission.getReadPermission(spec.type)
@@ -1127,7 +1224,7 @@ class HealthExportEngine(
                 response.records.forEach { record ->
                     if (!predicate(record)) return@forEach
                     onRecord(record)
-                    if (writeRecord(writer, spec.name, record, writtenRecordIds)) {
+                    if (writeRecords && writeRecord(writer, spec.name, record, writtenRecordIds)) {
                         state.count += 1
                     }
                 }
@@ -1303,6 +1400,11 @@ class HealthExportEngine(
         val end: Instant,
     )
 
+    private data class TimedValue(
+        val time: Instant,
+        val value: Double,
+    )
+
     private data class HeartRateSample(
         val time: Instant,
         val beatsPerMinute: Long,
@@ -1470,6 +1572,11 @@ private fun BufferedWriter.writeJsonLine(value: String) {
     write(value)
     newLine()
 }
+
+private fun Collection<Number>.averageOrNull(): Double? =
+    if (isEmpty()) null else sumOf { it.toDouble() } / size
+
+private fun Double.rounded(): Double = Math.round(this * 10.0) / 10.0
 
 private fun jsonObject(vararg fields: Pair<String, Any?>): String = fields.joinToString(
     prefix = "{",
