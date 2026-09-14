@@ -41,6 +41,17 @@ data class DailyMetric(
 
     val awakenings: Int?
         get() = sleepAwakenings.values.takeIf { it.isNotEmpty() }?.sum()
+
+    /**
+     * Whether the day had already ended the last time this row was written.
+     *
+     * A row for today holds however much of the day has happened so far, and read beside completed
+     * days it looks like a collapse rather than an afternoon. The same is true of a day whose last
+     * sync ran before midnight and was never revisited, which is why this compares when the row was
+     * written against the day it describes rather than simply asking whether the date is today.
+     */
+    fun isComplete(zone: java.time.ZoneId = java.time.ZoneId.systemDefault()): Boolean =
+        updatedAt.atZone(zone).toLocalDate().isAfter(date)
 }
 
 /** A day whose stored value was replaced by a different one, and when. */
