@@ -53,6 +53,22 @@ This document defines how generated OHealth Insights reports should be interpret
 6. No HRV data exists in this export (`HeartRateVariabilityRmssdRecord` is empty), so recovery
    cannot be assessed the way a sleep tracker normally would.
 
+## Heart rate
+
+1. Compact exports carry no raw heart-rate samples. A full history holds 1.2 million of them, about
+   half of every record in the file, and they are reducible to a handful of numbers per session.
+   The full diagnostic export still writes them.
+2. `sleep_summary` lines carry, per night: time in bed, heart-rate sample count, minimum and average
+   heart rate, minutes from falling asleep to the lowest reading, the awakening estimate, oxygen
+   sample count with minimum, average and counts below 92% and 90%, and average respiratory rate.
+3. `workout_heart_rate` lines carry sample count and minimum, average and maximum heart rate.
+4. How deep the nocturnal heart rate fell and how soon is the most informative signal available
+   here, because stages and HRV are both absent. Compare a night against this user's own other
+   nights, never against population norms.
+5. Oxygen counts are counts of samples below a threshold, not scored desaturation events, and the
+   sampling is roughly one reading per minute. Treat a raised count as a prompt to look, not as a
+   finding.
+
 ## Exercise sessions versus training sessions
 
 Health Connect/OHealth exercise records are activity records, not automatically distinct training sessions.
