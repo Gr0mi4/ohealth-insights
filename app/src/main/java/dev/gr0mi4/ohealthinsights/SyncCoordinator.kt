@@ -32,6 +32,16 @@ class SyncCoordinator(context: Context) {
         ReportBuilder(metricsStore),
     )
 
+    /**
+     * Resolves Drive authorisation while an Activity is still available to show consent.
+     *
+     * [SyncService] runs without a screen and cannot ask for anything, so the answer has to be
+     * settled before it starts.
+     */
+    suspend fun ensureDriveAuthorization(
+        launchAuth: suspend (IntentSenderRequest) -> AuthorizationResult?,
+    ): Boolean = driveUploader.resolveAccessToken(launchAuth) != null
+
     fun canAutoUpload(diagnostic: Boolean): Boolean =
         driveUploader.canAutoUpload(driveSettingsStore.load(), diagnostic)
 

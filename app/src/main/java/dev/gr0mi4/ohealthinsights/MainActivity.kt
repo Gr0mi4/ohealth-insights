@@ -6,6 +6,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Intent
 import android.net.Uri
+import android.Manifest
 import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
@@ -37,10 +38,7 @@ import java.time.ZoneId
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import java.time.temporal.ChronoUnit
-import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -66,6 +64,11 @@ class MainActivity : ComponentActivity() {
     private var pendingCheckpoint: SyncCheckpoint? = null
 
     private var displayedProgress = 0
+    private var lastRenderedStage: String? = null
+
+    private val notificationPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { /* Declining is allowed; the main screen still shows the last sync time. */ }
     private var lastProgressStage: String? = null
     private var lastProgressStageAt = 0L
 
@@ -232,6 +235,25 @@ class MainActivity : ComponentActivity() {
         }
 
         setContentView(ScrollView(this).apply { addView(content) })
+
+        observeSync()
+        requestNotificationPermissionOnce()
+    }
+
+    /**
+     * Asked here rather than only on the Drive settings screen.
+     *
+     * Everything the app has to say when it cannot reach the user - a sync blocked for days, a lost
+     * Drive grant - goes through a notification, and without this permission those messages are
+     * dropped silently, which is the failure they exist to prevent.
+     */
+    private fun requestNotificationPermissionOnce() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        if (SyncNotifications.canNotify(this)) return
+        val prefs = getSharedPreferences(UI_PREFS, MODE_PRIVATE)
+        if (prefs.getBoolean(KEY_NOTIFICATION_ASKED, false)) return
+        prefs.edit().putBoolean(KEY_NOTIFICATION_ASKED, true).apply()
+        notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
     }
 
     private fun initializeHealthConnect() {
@@ -335,8 +357,14 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * Hands the export to [SyncService] and only watches it from here.
+     *
+     * Authorisation is resolved first, while there is still a screen to put a consent dialog on:
+     * the service cannot ask for anything once it is running.
+     */
     private fun startExport(diagnostic: Boolean) {
-        val client = healthConnectClient ?: return
+        if (healthConnectClient == null || SyncSession.isRunning) return
         displayedProgress = 0
         lastProgressStage = null
         lastProgressStageAt = SystemClock.elapsedRealtime()
@@ -345,46 +373,60 @@ class MainActivity : ComponentActivity() {
         statusText.text = if (diagnostic) "Diagnostic export running" else "Compact sync running"
 
         lifecycleScope.launch {
-            val startedAt = SystemClock.elapsedRealtime()
-            val stage = AtomicReference(
-                if (diagnostic) "Starting full raw diagnostic export" else "Starting compact sync",
-            )
             val autoUpload = syncCoordinator.canAutoUpload(diagnostic)
-
             debugLog.clear()
             debugLog.add(
                 "Export started (diagnostic=$diagnostic, autoUpload=$autoUpload, version=${BuildConfig.VERSION_NAME})",
             )
-            debugLog.add(stage.get())
-            renderProgress(stage.get(), startedAt)
 
-            // The engine reports every Health Connect call, so the UI samples the latest stage
-            // instead of switching to the main thread thousands of times.
-            val timer = launch {
-                while (isActive) {
-                    delay(progressRefreshMillis)
-                    renderProgress(stage.get(), startedAt)
+            if (autoUpload) {
+                val authorized = runCatching {
+                    syncCoordinator.ensureDriveAuthorization { request -> requestDriveAuthorization(request) }
+                }.getOrDefault(false)
+                if (!authorized) {
+                    debugLog.add("Drive authorization was not granted")
+                    setBusy(false)
+                    statusText.text = "Connect Google Drive before syncing, or turn auto-upload off."
+                    return@launch
                 }
             }
-            val outcome = try {
-                syncCoordinator.run(
-                    client = client,
-                    diagnostic = diagnostic,
-                    onStage = { message ->
-                        stage.set(message)
-                        debugLog.add(message, SystemClock.elapsedRealtime() - startedAt)
-                    },
-                    launchAuth = { request -> requestDriveAuthorization(request) },
-                )
-            } finally {
-                timer.cancel()
-            }
 
-            when (outcome) {
-                is SyncOutcome.Uploaded -> showUploaded(outcome, startedAt)
-                is SyncOutcome.ReadyToSave -> showReadyToSave(outcome, startedAt)
-                is SyncOutcome.UploadFailed -> showUploadFailed(outcome, startedAt)
-                is SyncOutcome.ExportFailed -> showExportFailed(outcome.error, stage.get(), startedAt)
+            SyncService.start(this@MainActivity, diagnostic)
+        }
+    }
+
+    /** Renders whatever the service is doing, including a run started before this screen existed. */
+    private fun observeSync() {
+        lifecycleScope.launch {
+            SyncSession.state.collect { state ->
+                when (state) {
+                    is SyncSession.State.Idle -> Unit
+
+                    is SyncSession.State.Running -> {
+                        setBusy(true)
+                        if (state.stage != lastRenderedStage) {
+                            lastRenderedStage = state.stage
+                            debugLog.add(
+                                state.stage,
+                                SystemClock.elapsedRealtime() - state.startedAtElapsedMillis,
+                            )
+                        }
+                        renderProgress(state.stage, state.startedAtElapsedMillis)
+                    }
+
+                    is SyncSession.State.Finished -> {
+                        lastRenderedStage = null
+                        val startedAt = state.startedAtElapsedMillis
+                        when (val outcome = state.outcome) {
+                            is SyncOutcome.Uploaded -> showUploaded(outcome, startedAt)
+                            is SyncOutcome.ReadyToSave -> showReadyToSave(outcome, startedAt)
+                            is SyncOutcome.UploadFailed -> showUploadFailed(outcome, startedAt)
+                            is SyncOutcome.ExportFailed ->
+                                showExportFailed(outcome.error, "export", startedAt)
+                        }
+                        SyncSession.clearFinished()
+                    }
+                }
             }
         }
     }
@@ -734,6 +776,8 @@ class MainActivity : ComponentActivity() {
         fun clear() = entries.clear()
 
         private companion object {
+        private const val UI_PREFS = "ohealth_ui"
+        private const val KEY_NOTIFICATION_ASKED = "notification_permission_asked"
             const val maxEntries = 500
         }
     }
