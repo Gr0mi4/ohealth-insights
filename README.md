@@ -53,7 +53,7 @@ The default export is a compact, gzip-compressed synchronization stream:
 - Heart rate is read inside exercise and sleep sessions and written as per-session summaries rather than raw samples; the full diagnostic export still carries the samples.
 - Steps are represented as one deduplicated Health Connect total and one OHealth total per day.
 - Calories are summed from OHealth-origin records per local day and per exercise session, with workout summary records dropped so sessions are not double-counted; the figure matches the OHealth app. Health Connect aggregation is not used because it substitutes basal-rate energy for uncovered minutes.
-- Sleep-associated oxygen saturation and respiratory rate remain granular.
+- Sleep-associated oxygen saturation keeps every reading below 96% plus a reference sample every ten minutes, so desaturations stay granular while normal stretches do not dominate the file; respiratory rate remains granular.
 - A manual full raw diagnostic export remains available for discovery and completeness checks.
 - The initial history floor defaults to 2025-04-01, but can be changed with the **History starts** date picker on the main screen to import older Health Connect/Zepp Life history.
 - Changing the history start date explicitly clears the incremental checkpoint, so the next compact sync safely rebuilds the selected period without deleting earlier export files.

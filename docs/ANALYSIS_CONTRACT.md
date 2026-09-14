@@ -68,6 +68,11 @@ This document defines how generated OHealth Insights reports should be interpret
 5. Oxygen counts are counts of samples below a threshold, not scored desaturation events, and the
    sampling is roughly one reading per minute. Treat a raised count as a prompt to look, not as a
    finding.
+6. Compact exports thin the raw oxygen samples: every reading below 96% is kept, so a desaturation
+   retains its full shape, and normal stretches are represented by one sample every ten minutes.
+   79% of readings are 97% or above and carry no information. The counts and minima in
+   `sleep_summary` are computed from every sample, before thinning, and remain exact. The full
+   diagnostic export keeps every sample.
 
 ## Exercise sessions versus training sessions
 

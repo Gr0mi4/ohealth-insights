@@ -152,6 +152,7 @@ class HealthExportEngine(
                     "permittedRecordTypes" to permittedTypes.size,
                     "rangeCount" to plan.ranges.size,
                     "heartRatePolicy" to if (diagnostic) "raw_in_session_windows" else "summarised_per_session",
+                    "oxygenPolicy" to if (diagnostic) "raw_in_sleep_windows" else "dips_plus_reference_samples",
                     "stepsPolicy" to "daily_deduplicated_and_ohealth",
                     "caloriesPolicy" to "ohealth_records_local_day_summary_deduplicated",
                     "compression" to "gzip",
@@ -673,13 +674,19 @@ class HealthExportEngine(
             granted = granted,
             states = states,
             writtenRecordIds = writtenRecordIds,
-            writeRecords = false,
+            writeFilter = { false },
             onRecord = { record ->
                 if (record is HeartRateRecord) {
                     record.samples.forEach { heartRate += HeartRateSample(it.time, it.beatsPerMinute) }
                 }
             },
         )
+        // Four fifths of the oxygen samples read 97% or above and say nothing. Every reading below
+        // the detail threshold is kept, so a desaturation retains its full shape including the way
+        // in and out, and a reference sample on a fixed cadence keeps the normal stretches legible.
+        // The summary below is still computed from every sample, thinning only affects what is
+        // written. The diagnostic export keeps all of them.
+        var lastWrittenOxygen: Instant? = null
         exportRecordTypeInWindows(
             writer = writer,
             spec = oxygenSpec,
@@ -688,6 +695,18 @@ class HealthExportEngine(
             granted = granted,
             states = states,
             writtenRecordIds = writtenRecordIds,
+            writeFilter = { record ->
+                if (record !is OxygenSaturationRecord) {
+                    true
+                } else {
+                    val previous = lastWrittenOxygen
+                    val keep = record.percentage.value < oxygenDetailBelowPercent ||
+                        previous == null ||
+                        ChronoUnit.MINUTES.between(previous, record.time) >= oxygenReferenceMinutes
+                    if (keep) lastWrittenOxygen = record.time
+                    keep
+                }
+            },
             onRecord = { record ->
                 if (record is OxygenSaturationRecord) {
                     sleepOxygen += TimedValue(record.time, record.percentage.value)
@@ -1164,7 +1183,7 @@ class HealthExportEngine(
         granted: Set<String>,
         states: Map<String, TypeState>,
         writtenRecordIds: BoundedIdSet,
-        writeRecords: Boolean = true,
+        writeFilter: (Record) -> Boolean = { true },
         onRecord: (Record) -> Unit = {},
     ) {
         if (HealthPermission.getReadPermission(spec.type) !in granted) return
@@ -1181,7 +1200,7 @@ class HealthExportEngine(
                 states = states,
                 writtenRecordIds = writtenRecordIds,
                 predicate = { record -> overlaps(record, window) },
-                writeRecords = writeRecords,
+                writeFilter = writeFilter,
                 onRecord = onRecord,
             )
         }
@@ -1197,7 +1216,7 @@ class HealthExportEngine(
         states: Map<String, TypeState>,
         writtenRecordIds: BoundedIdSet,
         predicate: (Record) -> Boolean = { true },
-        writeRecords: Boolean = true,
+        writeFilter: (Record) -> Boolean = { true },
         onRecord: (Record) -> Unit = {},
     ) {
         val permission = HealthPermission.getReadPermission(spec.type)
@@ -1224,7 +1243,7 @@ class HealthExportEngine(
                 response.records.forEach { record ->
                     if (!predicate(record)) return@forEach
                     onRecord(record)
-                    if (writeRecords && writeRecord(writer, spec.name, record, writtenRecordIds)) {
+                    if (writeFilter(record) && writeRecord(writer, spec.name, record, writtenRecordIds)) {
                         state.count += 1
                     }
                 }
@@ -1467,6 +1486,11 @@ class HealthExportEngine(
 
         // Awakening estimation. The threshold is deliberately low: measured nights sit within a few
         // beats of their own baseline, so a conventional spike rule would report nothing at all.
+        // Chosen from the data: 79% of samples read 97% or above, and everything of interest sits
+        // below 96%, which is also where a desaturation passes on its way down and back up.
+        private const val oxygenDetailBelowPercent = 96.0
+        private const val oxygenReferenceMinutes = 10L
+
         private const val sleepEdgeMinutes = 10L
         private const val minimumSleepSamples = 20
         private const val awakeningBeatsAboveBaseline = 6
