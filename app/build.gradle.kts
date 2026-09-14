@@ -14,8 +14,8 @@ val localProperties = Properties().apply {
 
 // The one place the version is declared. The launcher icon is generated from this value, so the
 // icon on the home screen always names the build that is actually installed.
-val appVersionCode = 26
-val appVersionName = "0.7.3"
+val appVersionCode = 27
+val appVersionName = "0.8.0"
 
 val launcherIconOutputDir: Provider<Directory> =
     layout.buildDirectory.dir("generated/res/launcherIcon")

@@ -4,6 +4,8 @@ import java.io.File
 import java.io.IOException
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
+import java.time.Duration
+import java.time.Instant
 import java.util.concurrent.TimeUnit
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -23,6 +25,7 @@ class DriveClient(
         rawFile: File,
         reportMarkdown: String,
         csvContent: String,
+        changeLogCsv: String,
         onProgress: (String) -> Unit = {},
     ): DriveUploadResult {
         onProgress("Ensuring Drive folders")
@@ -46,54 +49,48 @@ class DriveClient(
         onProgress("Trimming Archive")
         runCatching { trimFolder(archiveId, keep = ARCHIVE_KEEP) }
 
-        // Replace rather than create: Drive allows several files of the same name in a folder, so
-        // two syncs on one day left two dated reports with no way to tell which was current.
-        onProgress("Uploading dated report")
-        upsertTextFile(
-            name = names.reportFileName,
-            mimeType = "text/markdown",
-            parentId = reportsId,
-            content = reportMarkdown,
-            existingFileId = null,
-        ).also { uploaded += names.reportFileName }
-
-        onProgress("Uploading dated metrics CSV")
-        upsertTextFile(
-            name = names.csvFileName,
+        // One cumulative file rather than a dated copy per sync. The dated copies each held the
+        // same ninety-day window, overlapping by eighty-nine days, so a year of them was 32,850
+        // rows describing 365 days and a year-over-year comparison meant stitching them by hand.
+        onProgress("Uploading metrics")
+        val csvId = upsertTextFile(
+            name = names.latestCsvName,
             mimeType = "text/csv",
             parentId = reportsId,
             content = csvContent,
-            existingFileId = null,
-        ).also { uploaded += names.csvFileName }
+            existingFileId = settings.latestCsvFileId,
+        ).also { uploaded += names.latestCsvName }
 
-        var latestReportId: String? = null
-        var latestCsvId: String? = null
-        if (settings.updateLatestReport) {
-            onProgress("Updating latest report files")
-            latestReportId = upsertTextFile(
-                name = names.latestReportName,
-                mimeType = "text/markdown",
-                parentId = reportsId,
-                content = reportMarkdown,
-                existingFileId = settings.latestReportFileId,
-            ).also { uploaded += names.latestReportName }
+        onProgress("Uploading report")
+        val reportId = upsertTextFile(
+            name = names.latestReportName,
+            mimeType = "text/markdown",
+            parentId = reportsId,
+            content = reportMarkdown,
+            existingFileId = settings.latestReportFileId,
+        ).also { uploaded += names.latestReportName }
 
-            latestCsvId = upsertTextFile(
-                name = names.latestCsvName,
+        if (changeLogCsv.isNotBlank()) {
+            onProgress("Uploading change log")
+            upsertTextFile(
+                name = names.changeLogName,
                 mimeType = "text/csv",
                 parentId = reportsId,
-                content = csvContent,
-                existingFileId = settings.latestCsvFileId,
-            ).also { uploaded += names.latestCsvName }
+                content = changeLogCsv,
+                existingFileId = null,
+            ).also { uploaded += names.changeLogName }
         }
+
+        onProgress("Rotating metrics snapshots")
+        runCatching { rotateSnapshots(archiveId, csvContent) }
 
         return DriveUploadResult(
             rootFolderId = rootId,
             reportsFolderId = reportsId,
             archiveFolderId = archiveId,
             uploadedFiles = uploaded,
-            latestReportFileId = latestReportId,
-            latestCsvFileId = latestCsvId,
+            latestReportFileId = reportId,
+            latestCsvFileId = csvId,
         )
     }
 
@@ -239,6 +236,63 @@ class DriveClient(
     }
 
     /**
+     * Keeps three generations of the metrics file: about a day, a week and a month old.
+     *
+     * Refreshed by age rather than on every sync, which is the whole point. Snapshotting each time
+     * would copy a bad write into all three within three syncs; ageing them out means the monthly
+     * copy predates anything noticed within a month. Promotion runs oldest first so no generation
+     * is skipped, and each copy is made before the older one is removed.
+     */
+    private fun rotateSnapshots(archiveId: String, currentCsv: String) {
+        val present = listFiles(
+            query = "'${escapeQuery(archiveId)}' in parents and trashed=false",
+            fields = "files(id,name,modifiedTime)",
+        ).associateBy { it.optString("name") }
+
+        val now = Instant.now()
+        fun ageDays(name: String): Long? = present[name]?.optString("modifiedTime")
+            ?.takeIf { it.isNotBlank() }
+            ?.let { runCatching { Duration.between(Instant.parse(it), now).toDays() }.getOrNull() }
+
+        fun due(name: String, days: Long): Boolean = (ageDays(name) ?: Long.MAX_VALUE) >= days
+
+        if (due(SNAPSHOT_MONTHLY, 30)) {
+            present[SNAPSHOT_WEEKLY]?.let { source ->
+                copyFile(source.getString("id"), SNAPSHOT_MONTHLY, archiveId)
+                present[SNAPSHOT_MONTHLY]?.let { runCatching { deleteFile(it.getString("id")) } }
+            }
+        }
+        if (due(SNAPSHOT_WEEKLY, 7)) {
+            present[SNAPSHOT_DAILY]?.let { source ->
+                copyFile(source.getString("id"), SNAPSHOT_WEEKLY, archiveId)
+                present[SNAPSHOT_WEEKLY]?.let { runCatching { deleteFile(it.getString("id")) } }
+            }
+        }
+        if (due(SNAPSHOT_DAILY, 1)) {
+            upsertTextFile(
+                name = SNAPSHOT_DAILY,
+                mimeType = "text/csv",
+                parentId = archiveId,
+                content = currentCsv,
+                existingFileId = present[SNAPSHOT_DAILY]?.getString("id"),
+            )
+        }
+    }
+
+    private fun copyFile(fileId: String, newName: String, parentId: String): String {
+        val metadata = JSONObject().apply {
+            put("name", newName)
+            put("parents", JSONArray().put(parentId))
+        }
+        val request = Request.Builder()
+            .url("$BASE/files/$fileId/copy?fields=id")
+            .post(metadata.toString().toRequestBody("application/json".toMediaType()))
+            .header("Authorization", authHeader())
+            .build()
+        return JSONObject(execute(request)).getString("id")
+    }
+
+    /**
      * Rotates the incremental exports, keeping the [keep] most recent, and never touches a full one.
      *
      * The files in here are not equivalent. An incremental export holds only what changed since the
@@ -253,13 +307,16 @@ class DriveClient(
             fields = "files(id,name,createdTime)",
             orderBy = "createdTime desc",
         )
-        files.filterNot { isFullExport(it.optString("name")) }
+        files.filterNot { isFullExport(it.optString("name")) || isSnapshot(it.optString("name")) }
             .drop(keep)
             .forEach { file -> runCatching { deleteFile(file.getString("id")) } }
     }
 
     private fun isFullExport(name: String): Boolean =
         FULL_EXPORT_MARKERS.any { name.contains(it) }
+
+    private fun isSnapshot(name: String): Boolean =
+        name == SNAPSHOT_DAILY || name == SNAPSHOT_WEEKLY || name == SNAPSHOT_MONTHLY
 
     private fun deleteFile(fileId: String) {
         val request = Request.Builder()
@@ -352,6 +409,10 @@ class DriveClient(
 
         /** Sync modes whose export is a complete snapshot, and so is never rotated away. */
         private val FULL_EXPORT_MARKERS = listOf("initial_compact", "full_diagnostic")
+
+        private const val SNAPSHOT_DAILY = "ohealth-metrics-daily.csv"
+        private const val SNAPSHOT_WEEKLY = "ohealth-metrics-weekly.csv"
+        private const val SNAPSHOT_MONTHLY = "ohealth-metrics-monthly.csv"
         private const val UPLOAD = "https://www.googleapis.com/upload/drive/v3/files"
         private val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
         private const val MULTIPART_LIMIT_BYTES = 5L * 1024 * 1024

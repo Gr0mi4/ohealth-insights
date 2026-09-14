@@ -2,6 +2,17 @@
 
 This document defines how generated OHealth Insights reports should be interpreted for personal analysis. It is intentionally free of personal health values, schedules, or other private data so it can live in the public repository.
 
+## Files
+
+1. `ohealth-metrics.csv` is the whole series, every day the app has ever recorded, replaced on each
+   sync. It is the only file to read for trends; there are no dated copies to stitch together.
+2. `ohealth-report.md` is a human-readable view of the last 14 days plus this contract.
+3. `ohealth-changes.csv` lists days whose stored value was later replaced by a different one, with
+   both values and when it happened. A value appearing where there was none is not a change. Use it
+   before concluding that a figure moved for a physiological reason.
+4. `Archive/` holds the raw exports plus three generations of the metrics file, roughly a day, a
+   week and a month old.
+
 ## Daily steps
 
 1. `stepsOHealth` is the canonical user-facing daily step count when it is available.

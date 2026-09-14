@@ -78,9 +78,17 @@ class ReportBuilder(
         }
     }
 
-    fun buildCsv(reportDays: Int = 90): String = buildString {
+    /**
+     * The whole series, not a window.
+     *
+     * This used to emit the last 90 days, and a dated copy of it was uploaded on every sync, so a
+     * year of use produced 365 files overlapping by 89 days each - 32,850 rows to describe 365
+     * days. One cumulative file replaces all of them, and is the only place a year-over-year
+     * comparison can come from.
+     */
+    fun buildCsv(): String = buildString {
         appendLine("date,steps_total,steps_ohealth,calories_ohealth_kcal,calories_covered_minutes,workout_count,workout_calories_ohealth_kcal,time_in_bed_minutes,awakenings_estimated")
-        metricsStore.recentDays(reportDays).forEach { day ->
+        metricsStore.allMetrics().forEach { day ->
             appendLine(
                 listOf(
                     day.date,
@@ -94,6 +102,14 @@ class ReportBuilder(
                     day.awakenings?.toString() ?: "",
                 ).joinToString(","),
             )
+        }
+    }
+
+    /** Days whose stored value was replaced by a different one, oldest first. */
+    fun buildChangeLogCsv(): String = buildString {
+        appendLine("changed_at,date,field,before,after")
+        metricsStore.changeLog().forEach { change ->
+            appendLine("${change.changedAt},${change.date},${change.field},${change.before},${change.after}")
         }
     }
 

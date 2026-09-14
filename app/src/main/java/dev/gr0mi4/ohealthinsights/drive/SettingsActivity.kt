@@ -35,8 +35,6 @@ class SettingsActivity : ComponentActivity() {
     private lateinit var rootFolderInput: EditText
     private lateinit var reportsFolderInput: EditText
     private lateinit var archiveFolderInput: EditText
-    private lateinit var reportTemplateInput: EditText
-    private lateinit var csvTemplateInput: EditText
     private lateinit var rawTemplateInput: EditText
     private lateinit var latestReportInput: EditText
     private lateinit var latestCsvInput: EditText
@@ -95,8 +93,6 @@ class SettingsActivity : ComponentActivity() {
         rootFolderInput = labeledInput("Root folder name")
         reportsFolderInput = labeledInput("Reports subfolder")
         archiveFolderInput = labeledInput("Archive subfolder")
-        reportTemplateInput = labeledInput("Report filename template")
-        csvTemplateInput = labeledInput("CSV filename template")
         rawTemplateInput = labeledInput("Raw export filename template")
         latestReportInput = labeledInput("Latest report filename")
         latestCsvInput = labeledInput("Latest CSV filename")
@@ -145,8 +141,6 @@ class SettingsActivity : ComponentActivity() {
             addView(rootFolderInput, wrap(top = 12))
             addView(reportsFolderInput, wrap(top = 8))
             addView(archiveFolderInput, wrap(top = 8))
-            addView(reportTemplateInput, wrap(top = 12))
-            addView(csvTemplateInput, wrap(top = 8))
             addView(rawTemplateInput, wrap(top = 8))
             addView(latestReportInput, wrap(top = 8))
             addView(latestCsvInput, wrap(top = 8))
@@ -183,8 +177,6 @@ class SettingsActivity : ComponentActivity() {
         rootFolderInput.setText(settings.rootFolderName)
         reportsFolderInput.setText(settings.reportsFolderName)
         archiveFolderInput.setText(settings.archiveFolderName)
-        reportTemplateInput.setText(settings.reportFileTemplate)
-        csvTemplateInput.setText(settings.csvFileTemplate)
         rawTemplateInput.setText(settings.rawFileTemplate)
         latestReportInput.setText(settings.latestReportName)
         latestCsvInput.setText(settings.latestCsvName)
@@ -205,8 +197,6 @@ class SettingsActivity : ComponentActivity() {
             rootFolderName = rootFolderInput.text.toString().ifBlank { existing.rootFolderName },
             reportsFolderName = reportsFolderInput.text.toString().ifBlank { existing.reportsFolderName },
             archiveFolderName = archiveFolderInput.text.toString().ifBlank { existing.archiveFolderName },
-            reportFileTemplate = reportTemplateInput.text.toString().ifBlank { existing.reportFileTemplate },
-            csvFileTemplate = csvTemplateInput.text.toString().ifBlank { existing.csvFileTemplate },
             rawFileTemplate = rawTemplateInput.text.toString().ifBlank { existing.rawFileTemplate },
             latestReportName = latestReportInput.text.toString().ifBlank { existing.latestReportName },
             latestCsvName = latestCsvInput.text.toString().ifBlank { existing.latestCsvName },
