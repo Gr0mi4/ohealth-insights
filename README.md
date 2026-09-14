@@ -44,7 +44,7 @@ Raw source data should remain immutable. Normalized datasets are derived views a
 
 ## Android exporter 0.5.0
 
-The default export is a compact, gzip-compressed synchronization stream:
+The default export is a compact, gzip-compressed synchronization stream. Records are written as their own fields rather than as a stringified object, so the stream can be read without parsing prose:
 
 - The first successful sync covers all readable history.
 - Later syncs use a Health Connect changes token and export only affected dates, updates, and deletion identifiers.

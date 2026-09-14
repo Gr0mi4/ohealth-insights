@@ -53,6 +53,17 @@ This document defines how generated OHealth Insights reports should be interpret
 6. No HRV data exists in this export (`HeartRateVariabilityRmssdRecord` is empty), so recovery
    cannot be assessed the way a sleep tracker normally would.
 
+## Record lines
+
+1. Schema version 4 writes each record's own fields. Earlier exports carried a single `payload`
+   string produced by the library's `toString()`, which had to be parsed with regular expressions
+   against a format nothing guaranteed.
+2. Interval records carry `startTime`, `startZoneOffset`, `endTime` and `endZoneOffset`; momentary
+   records carry `time` and `zoneOffset`. Always prefer a record's own offset over the phone's
+   current zone when deciding which day it belongs to.
+3. Series records carry `sampleCount` and a `samples` array. Record types that carry no data in this
+   export keep the old `payload` blob, so nothing is lost if one of them starts arriving.
+
 ## Heart rate
 
 1. Compact exports carry no raw heart-rate samples. A full history holds 1.2 million of them, about

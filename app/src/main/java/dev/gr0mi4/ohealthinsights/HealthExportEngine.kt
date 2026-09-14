@@ -61,6 +61,7 @@ import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.Period
 import java.time.ZoneId
+import java.time.ZoneOffset
 import java.time.temporal.ChronoUnit
 import java.util.TreeSet
 import java.util.zip.GZIPOutputStream
@@ -138,7 +139,7 @@ class HealthExportEngine(
             writer.writeJsonLine(
                 jsonObject(
                     "kind" to "manifest",
-                    "schemaVersion" to 3,
+                    "schemaVersion" to 4,
                     "appVersion" to BuildConfig.VERSION_NAME,
                     "syncMode" to plan.mode.wireName,
                     "exportedAt" to exportedAt.toString(),
@@ -1221,10 +1222,121 @@ class HealthExportEngine(
                 "lastModifiedTime" to record.metadata.lastModifiedTime.toString(),
                 "clientRecordId" to record.metadata.clientRecordId,
                 "clientRecordVersion" to record.metadata.clientRecordVersion,
-                "payload" to record.toString(),
+                *recordFields(record).toTypedArray(),
             ),
         )
         return true
+    }
+
+    /**
+     * The record's own fields, rather than its `toString()`.
+     *
+     * `toString()` was cheap to write and expensive everywhere else: it rendered every sample of a
+     * series record into one string - a full history holds 1.2 million heart-rate samples - and it
+     * left the only machine-readable form of the data a blob that had to be parsed with regular
+     * expressions, against a format no contract covers and a library is free to change.
+     *
+     * Types with no branch below carry no data in this export; they fall back to the blob so
+     * nothing is silently lost if one of them ever starts arriving.
+     */
+    private fun recordFields(record: Record): List<Pair<String, Any?>> = buildList {
+        // InstantaneousRecord and IntervalRecord are internal to the library, so the time fields
+        // come from the same reflective accessors overlap checking already uses.
+        val bounds = recordBounds(record)
+        if (bounds != null) {
+            if (bounds.start == bounds.end) {
+                add("time" to bounds.start.toString())
+            } else {
+                add("startTime" to bounds.start.toString())
+                add("endTime" to bounds.end.toString())
+            }
+        }
+        add("zoneOffset" to recordZoneOffset(record)?.toString())
+        when (record) {
+            is ActiveCaloriesBurnedRecord -> add("energyKcal" to record.energy.inKilocalories)
+            is TotalCaloriesBurnedRecord -> add("energyKcal" to record.energy.inKilocalories)
+            is BasalMetabolicRateRecord ->
+                add("basalMetabolicRateKcalPerDay" to record.basalMetabolicRate.inKilocaloriesPerDay)
+
+            is StepsRecord -> add("count" to record.count)
+            is DistanceRecord -> add("distanceMeters" to record.distance.inMeters)
+            is ElevationGainedRecord -> add("elevationMeters" to record.elevation.inMeters)
+            is FloorsClimbedRecord -> add("floors" to record.floors)
+            is HeightRecord -> add("heightMeters" to record.height.inMeters)
+            is WeightRecord -> add("weightKilograms" to record.weight.inKilograms)
+            is RestingHeartRateRecord -> add("beatsPerMinute" to record.beatsPerMinute)
+            is RespiratoryRateRecord -> add("rate" to record.rate)
+            is OxygenSaturationRecord -> add("percentage" to record.percentage.value)
+
+            is HeartRateRecord -> {
+                add("sampleCount" to record.samples.size)
+                add(
+                    "samples" to RawJson(
+                        record.samples.joinToString(",", "[", "]") { sample ->
+                            jsonObject(
+                                "time" to sample.time.toString(),
+                                "beatsPerMinute" to sample.beatsPerMinute,
+                            )
+                        },
+                    ),
+                )
+            }
+
+            is SpeedRecord -> {
+                add("sampleCount" to record.samples.size)
+                add(
+                    "samples" to RawJson(
+                        record.samples.joinToString(",", "[", "]") { sample ->
+                            jsonObject(
+                                "time" to sample.time.toString(),
+                                "metersPerSecond" to sample.speed.inMetersPerSecond,
+                            )
+                        },
+                    ),
+                )
+            }
+
+            is StepsCadenceRecord -> {
+                add("sampleCount" to record.samples.size)
+                add(
+                    "samples" to RawJson(
+                        record.samples.joinToString(",", "[", "]") { sample ->
+                            jsonObject(
+                                "time" to sample.time.toString(),
+                                "rate" to sample.rate,
+                            )
+                        },
+                    ),
+                )
+            }
+
+            is ExerciseSessionRecord -> {
+                add("exerciseType" to record.exerciseType)
+                add("title" to record.title)
+                add("notes" to record.notes)
+                add("segmentCount" to record.segments.size)
+                add("lapCount" to record.laps.size)
+            }
+
+            is SleepSessionRecord -> {
+                add("title" to record.title)
+                add("notes" to record.notes)
+                add("stageCount" to record.stages.size)
+                add(
+                    "stages" to RawJson(
+                        record.stages.joinToString(",", "[", "]") { stage ->
+                            jsonObject(
+                                "startTime" to stage.startTime.toString(),
+                                "endTime" to stage.endTime.toString(),
+                                "stage" to stage.stage,
+                            )
+                        },
+                    ),
+                )
+            }
+
+            else -> add("payload" to record.toString())
+        }
     }
 
     private fun recordBounds(record: Record): TimeWindow? {
@@ -1234,6 +1346,12 @@ class HealthExportEngine(
                 start = methods.firstOrNull { it.name == "getStartTime" && it.parameterCount == 0 },
                 end = methods.firstOrNull { it.name == "getEndTime" && it.parameterCount == 0 },
                 time = methods.firstOrNull { it.name == "getTime" && it.parameterCount == 0 },
+                startZoneOffset = methods.firstOrNull {
+                    it.name == "getStartZoneOffset" && it.parameterCount == 0
+                },
+                zoneOffset = methods.firstOrNull {
+                    it.name == "getZoneOffset" && it.parameterCount == 0
+                },
             )
         }
         val start = accessors.start?.invoke(record) as? Instant
@@ -1241,6 +1359,13 @@ class HealthExportEngine(
         if (start != null && end != null) return TimeWindow(start, end)
         val time = accessors.time?.invoke(record) as? Instant ?: return null
         return TimeWindow(time, time)
+    }
+
+    /** The offset the record was written in, which is how a record is attributed to a local day. */
+    private fun recordZoneOffset(record: Record): ZoneOffset? {
+        val accessors = temporalAccessorCache[record.javaClass] ?: return null
+        return accessors.startZoneOffset?.invoke(record) as? ZoneOffset
+            ?: accessors.zoneOffset?.invoke(record) as? ZoneOffset
     }
 
     private fun overlaps(record: Record, range: TimeWindow): Boolean {
@@ -1316,6 +1441,8 @@ class HealthExportEngine(
         val start: java.lang.reflect.Method?,
         val end: java.lang.reflect.Method?,
         val time: java.lang.reflect.Method?,
+        val startZoneOffset: java.lang.reflect.Method? = null,
+        val zoneOffset: java.lang.reflect.Method? = null,
     )
 
     private data class LocalWindow(
@@ -1359,7 +1486,12 @@ class HealthExportEngine(
         private const val dailyAggregationChunkDays = 45L
         private const val windowLookbackMinutes = 60L
         private const val fallbackOverlapDays = 7L
-        private const val maxTrackedRecordIds = 250_000
+        // Sized for the overlap between ranges, not for the export. Ranges advance in order, a
+        // session reaches at most a day back and a recovery at most seven, so the window that can
+        // legitimately be re-read is a few thousand records. A 938k-record diagnostic export
+        // produced no duplicate ids at all, while the set itself retained roughly 33 MB of heap in
+        // UUID strings alongside the sample buffers.
+        private const val maxTrackedRecordIds = 50_000
         private const val maxChangesPages = 200
         private const val maxAffectedDaysPerRecord = 400
         private const val maxSlowStages = 40
@@ -1463,9 +1595,13 @@ private fun jsonObject(vararg fields: Pair<String, Any?>): String = fields.joinT
     separator = ",",
 ) { (key, value) -> "${jsonString(key)}:${jsonValue(value)}" }
 
+/** Already-encoded JSON, emitted verbatim so nested arrays do not have to be escaped. */
+private class RawJson(val text: String)
+
 private fun jsonValue(value: Any?): String = when (value) {
     null -> "null"
     is Boolean, is Number -> value.toString()
+    is RawJson -> value.text
     else -> jsonString(value.toString())
 }
 
