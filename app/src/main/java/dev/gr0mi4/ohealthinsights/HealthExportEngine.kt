@@ -23,8 +23,6 @@ import androidx.health.connect.client.records.ExerciseSessionRecord
 import androidx.health.connect.client.records.FloorsClimbedRecord
 import androidx.health.connect.client.records.HeartRateRecord
 import androidx.health.connect.client.records.HeartRateVariabilityRmssdRecord
-import androidx.health.connect.client.records.InstantaneousRecord
-import androidx.health.connect.client.records.IntervalRecord
 import androidx.health.connect.client.records.HeightRecord
 import androidx.health.connect.client.records.HydrationRecord
 import androidx.health.connect.client.records.IntermenstrualBleedingRecord
@@ -63,6 +61,7 @@ import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.Period
 import java.time.ZoneId
+import java.time.ZoneOffset
 import java.time.temporal.ChronoUnit
 import java.util.TreeSet
 import java.util.zip.GZIPOutputStream
@@ -1241,19 +1240,18 @@ class HealthExportEngine(
      * nothing is silently lost if one of them ever starts arriving.
      */
     private fun recordFields(record: Record): List<Pair<String, Any?>> = buildList {
-        when (record) {
-            is InstantaneousRecord -> {
-                add("time" to record.time.toString())
-                add("zoneOffset" to record.zoneOffset?.toString())
-            }
-
-            is IntervalRecord -> {
-                add("startTime" to record.startTime.toString())
-                add("startZoneOffset" to record.startZoneOffset?.toString())
-                add("endTime" to record.endTime.toString())
-                add("endZoneOffset" to record.endZoneOffset?.toString())
+        // InstantaneousRecord and IntervalRecord are internal to the library, so the time fields
+        // come from the same reflective accessors overlap checking already uses.
+        val bounds = recordBounds(record)
+        if (bounds != null) {
+            if (bounds.start == bounds.end) {
+                add("time" to bounds.start.toString())
+            } else {
+                add("startTime" to bounds.start.toString())
+                add("endTime" to bounds.end.toString())
             }
         }
+        add("zoneOffset" to recordZoneOffset(record)?.toString())
         when (record) {
             is ActiveCaloriesBurnedRecord -> add("energyKcal" to record.energy.inKilocalories)
             is TotalCaloriesBurnedRecord -> add("energyKcal" to record.energy.inKilocalories)
@@ -1348,6 +1346,12 @@ class HealthExportEngine(
                 start = methods.firstOrNull { it.name == "getStartTime" && it.parameterCount == 0 },
                 end = methods.firstOrNull { it.name == "getEndTime" && it.parameterCount == 0 },
                 time = methods.firstOrNull { it.name == "getTime" && it.parameterCount == 0 },
+                startZoneOffset = methods.firstOrNull {
+                    it.name == "getStartZoneOffset" && it.parameterCount == 0
+                },
+                zoneOffset = methods.firstOrNull {
+                    it.name == "getZoneOffset" && it.parameterCount == 0
+                },
             )
         }
         val start = accessors.start?.invoke(record) as? Instant
@@ -1355,6 +1359,13 @@ class HealthExportEngine(
         if (start != null && end != null) return TimeWindow(start, end)
         val time = accessors.time?.invoke(record) as? Instant ?: return null
         return TimeWindow(time, time)
+    }
+
+    /** The offset the record was written in, which is how a record is attributed to a local day. */
+    private fun recordZoneOffset(record: Record): ZoneOffset? {
+        val accessors = temporalAccessorCache[record.javaClass] ?: return null
+        return accessors.startZoneOffset?.invoke(record) as? ZoneOffset
+            ?: accessors.zoneOffset?.invoke(record) as? ZoneOffset
     }
 
     private fun overlaps(record: Record, range: TimeWindow): Boolean {
@@ -1430,6 +1441,8 @@ class HealthExportEngine(
         val start: java.lang.reflect.Method?,
         val end: java.lang.reflect.Method?,
         val time: java.lang.reflect.Method?,
+        val startZoneOffset: java.lang.reflect.Method? = null,
+        val zoneOffset: java.lang.reflect.Method? = null,
     )
 
     private data class LocalWindow(
