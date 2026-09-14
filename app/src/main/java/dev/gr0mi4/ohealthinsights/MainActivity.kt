@@ -33,8 +33,10 @@ import androidx.lifecycle.lifecycleScope
 import java.io.File
 import java.time.Instant
 import java.time.LocalDate
+import java.time.ZoneId
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
+import java.time.temporal.ChronoUnit
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -280,10 +282,12 @@ class MainActivity : ComponentActivity() {
             val configuredHistoryStart = syncState.historyStartDate()
             val hasCheckpoint = syncState.hasCheckpoint()
             val hasChangesToken = syncState.hasChangesToken()
+            val lastSync = syncState.lastCompletedSync()
             val driveSettings = driveSettingsStore.load()
 
             detailsText.text = buildString {
                 appendLine("Version ${BuildConfig.VERSION_NAME}")
+                appendLine("Last sync: ${formatLastSync(lastSync)}")
                 appendLine("Readable record types: $grantedRecordTypes/${HealthExportEngine.recordTypeCount}")
                 appendLine(
                     "Full-history access: " +
@@ -750,6 +754,26 @@ class MainActivity : ComponentActivity() {
         private val rawProgressRegex = Regex("raw (\\d+)/(\\d+)")
         private val workoutProgressRegex = Regex("workout calories (\\d+)/(\\d+)")
     }
+}
+
+/**
+ * Absolute time plus how long ago, because either alone leaves a question: the clock time does not
+ * say whether a sync is overdue, and "2 days ago" does not say which day it covered.
+ */
+private fun formatLastSync(at: Instant?): String {
+    if (at == null) return "never"
+    val stamp = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
+        .withZone(ZoneId.systemDefault())
+        .format(at)
+    val minutes = ChronoUnit.MINUTES.between(at, Instant.now())
+    val ago = when {
+        minutes < 0 -> "clock moved"
+        minutes < 1 -> "just now"
+        minutes < 60 -> "$minutes min ago"
+        minutes < 60 * 24 -> "${minutes / 60} h ago"
+        else -> "${minutes / (60 * 24)} d ago"
+    }
+    return "$stamp ($ago)"
 }
 
 private fun formatElapsed(millis: Long): String {

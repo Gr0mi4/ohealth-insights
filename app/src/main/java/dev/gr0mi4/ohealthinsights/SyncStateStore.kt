@@ -18,6 +18,20 @@ class SyncStateStore(context: Context) {
 
     fun hasCheckpoint(): Boolean = !prefs.getString(KEY_LAST_EXPORT, null).isNullOrBlank()
 
+    /**
+     * When an export last finished reading, whether or not it advanced the checkpoint.
+     *
+     * Kept apart from [lastSuccessfulExport], which is checkpoint bookkeeping: a diagnostic export
+     * deliberately leaves the checkpoint alone, and a compact sync holds it back after a read
+     * failure, so neither is the answer to "when did this last run".
+     */
+    fun lastCompletedSync(): Instant? = prefs.getString(KEY_LAST_COMPLETED, null)
+        ?.let { runCatching { Instant.parse(it) }.getOrNull() }
+
+    fun recordCompletedSync(at: Instant) {
+        prefs.edit().putString(KEY_LAST_COMPLETED, at.toString()).apply()
+    }
+
     fun hasChangesToken(): Boolean = !prefs.getString(KEY_CHANGES_TOKEN, null).isNullOrBlank()
 
     fun historyStartDate(): LocalDate = prefs.getString(KEY_HISTORY_START, null)
@@ -42,6 +56,7 @@ class SyncStateStore(context: Context) {
         private const val KEY_CHANGES_TOKEN = "changes_token_v1"
         private const val KEY_LAST_EXPORT = "last_successful_export_v1"
         private const val KEY_HISTORY_START = "history_start_date_v1"
+        private const val KEY_LAST_COMPLETED = "last_completed_sync_v1"
 
         val requestedPermissions = HealthExportEngine.recordReadPermissions +
             HealthExportEngine.historyPermission +

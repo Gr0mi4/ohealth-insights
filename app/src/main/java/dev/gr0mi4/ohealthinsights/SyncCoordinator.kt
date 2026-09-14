@@ -66,6 +66,8 @@ class SyncCoordinator(context: Context) {
             return SyncOutcome.ExportFailed(error)
         }
 
+        syncState.recordCompletedSync(exportedAt)
+
         val checkpoint = summary.checkpointTime?.let { SyncCheckpoint(summary.checkpointToken, it) }
         if (!autoUpload) return SyncOutcome.ReadyToSave(summary, file, checkpoint)
 
