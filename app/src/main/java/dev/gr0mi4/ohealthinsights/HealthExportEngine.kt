@@ -152,7 +152,7 @@ class HealthExportEngine(
                     "rangeCount" to plan.ranges.size,
                     "heartRatePolicy" to "workout_or_sleep_windows",
                     "stepsPolicy" to "daily_deduplicated_and_ohealth",
-                    "caloriesPolicy" to "ohealth_active_with_ohealth_total_fallback",
+                    "caloriesPolicy" to "ohealth_active_with_ohealth_total_fallback_origin_tagged",
                     "compression" to "gzip",
                     "changesTokenExpired" to plan.changesTokenExpired,
                 ),
@@ -766,18 +766,24 @@ class HealthExportEngine(
             .forEach { date ->
             if (!writtenDailyDates.add(date)) return@forEach
             val stepsTotal = deduplicatedSteps[date]?.result
-            val activeCalories = ohealthActiveCalories[date]
-                ?.result
-                ?.get(ActiveCaloriesBurnedRecord.ACTIVE_CALORIES_TOTAL)
-            val totalCaloriesFallback = ohealthTotalCalories[date]
-                ?.result
-                ?.get(TotalCaloriesBurnedRecord.ENERGY_TOTAL)
+            val activeResult = ohealthActiveCalories[date]?.result
+            val totalResult = ohealthTotalCalories[date]?.result
+            val activeCalories = activeResult?.get(ActiveCaloriesBurnedRecord.ACTIVE_CALORIES_TOTAL)
+            val totalCaloriesFallback = totalResult?.get(TotalCaloriesBurnedRecord.ENERGY_TOTAL)
             val caloriesOHealth = activeCalories ?: totalCaloriesFallback
             val calorieRecordType = when {
                 activeCalories != null -> "ActiveCaloriesBurnedRecord"
                 totalCaloriesFallback != null -> "TotalCaloriesBurnedRecord"
                 else -> null
             }
+            // Health Connect synthesises a total-calorie aggregate from basal metabolic rate when no
+            // record backs the requested window, so report the observed origins instead of assuming
+            // OHealth and flag values that no record actually supports.
+            val calorieOrigins = when {
+                activeCalories != null -> activeResult?.dataOrigins
+                totalCaloriesFallback != null -> totalResult?.dataOrigins
+                else -> null
+            }.orEmpty()
             writer.writeJsonLine(
                 jsonObject(
                     "kind" to "daily_activity",
@@ -790,7 +796,12 @@ class HealthExportEngine(
                         ?.map { it.packageName }
                         ?.sorted()
                         ?.joinToString(","),
-                    "caloriesOHealthSourcePackage" to if (caloriesOHealth != null) ohealthPackage else null,
+                    "caloriesOHealthSourcePackages" to calorieOrigins
+                        .map { it.packageName }
+                        .sorted()
+                        .joinToString(",")
+                        .ifEmpty { null },
+                    "caloriesOHealthDerived" to if (caloriesOHealth != null) calorieOrigins.isEmpty() else null,
                 ),
             )
             reportCollector?.onDailyActivity(
@@ -850,14 +861,16 @@ class HealthExportEngine(
                 }
             }
             result.exceptionOrNull()?.let { if (it is CancellationException) throw it }
-            val activeCalories = result.getOrNull()?.get(ActiveCaloriesBurnedRecord.ACTIVE_CALORIES_TOTAL)
-            val totalCaloriesFallback = result.getOrNull()?.get(TotalCaloriesBurnedRecord.ENERGY_TOTAL)
+            val aggregation = result.getOrNull()
+            val activeCalories = aggregation?.get(ActiveCaloriesBurnedRecord.ACTIVE_CALORIES_TOTAL)
+            val totalCaloriesFallback = aggregation?.get(TotalCaloriesBurnedRecord.ENERGY_TOTAL)
             val caloriesOHealth = activeCalories ?: totalCaloriesFallback
             val calorieRecordType = when {
                 activeCalories != null -> "ActiveCaloriesBurnedRecord"
                 totalCaloriesFallback != null -> "TotalCaloriesBurnedRecord"
                 else -> null
             }
+            val calorieOrigins = if (caloriesOHealth != null) aggregation?.dataOrigins.orEmpty() else emptySet()
             writer.writeJsonLine(
                 jsonObject(
                     "kind" to "workout_energy",
@@ -867,6 +880,12 @@ class HealthExportEngine(
                     "title" to workout.title,
                     "caloriesOHealthKcal" to caloriesOHealth?.inKilocalories,
                     "caloriesOHealthRecordType" to calorieRecordType,
+                    "caloriesOHealthSourcePackages" to calorieOrigins
+                        .map { it.packageName }
+                        .sorted()
+                        .joinToString(",")
+                        .ifEmpty { null },
+                    "caloriesOHealthDerived" to if (caloriesOHealth != null) calorieOrigins.isEmpty() else null,
                     "status" to if (result.isSuccess) "complete" else "failed",
                     "message" to result.exceptionOrNull()?.message,
                 ),

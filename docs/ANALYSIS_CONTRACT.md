@@ -18,6 +18,13 @@ This document defines how generated OHealth Insights reports should be interpret
 4. Data written by Google Fit or other apps is never included.
 5. Workout calorie values use the same OHealth-only preference and fallback.
 6. A current-day calorie value may be partial when synchronization runs before the local day ends.
+7. `caloriesOHealthRecordType` names the record type the value came from. `TotalCaloriesBurnedRecord`
+   includes basal energy and is therefore not comparable with an `ActiveCaloriesBurnedRecord` value;
+   never place both in the same series without saying which is which.
+8. `caloriesOHealthSourcePackages` lists the data origins that actually backed the aggregate, and
+   `caloriesOHealthDerived` is `true` when a value exists that no stored record supports. Health
+   Connect synthesises such totals from basal metabolic rate, so a derived value describes resting
+   metabolism rather than measured activity and must be excluded from activity analysis.
 
 ## Exercise sessions versus training sessions
 
