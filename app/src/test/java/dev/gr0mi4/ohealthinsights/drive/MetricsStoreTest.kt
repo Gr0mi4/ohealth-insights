@@ -210,6 +210,34 @@ class MetricsStoreTest {
     }
 
     @Test
+    fun `a day still in progress is not written to the change log`() {
+        store.upsertDaily(DailyMetric(date = today, stepsOHealth = 4_824))
+        store.upsertDaily(DailyMetric(date = today, stepsOHealth = 4_835))
+        store.upsertDaily(DailyMetric(date = today, stepsOHealth = 4_844))
+
+        assertEquals(emptyList<MetricChange>(), MetricsStore(file).changeLog())
+    }
+
+    @Test
+    fun `a finished day changing is still recorded`() {
+        val yesterday = today.minusDays(1)
+        store.upsertDaily(DailyMetric(date = yesterday, stepsOHealth = 12_000))
+        store.upsertDaily(DailyMetric(date = yesterday, stepsOHealth = 15_315))
+
+        val change = MetricsStore(file).changeLog().single()
+        assertEquals(yesterday, change.date)
+        assertEquals("12000", change.before)
+        assertEquals("15315", change.after)
+    }
+
+    @Test
+    fun `weight survives a round trip`() {
+        store.upsertDaily(DailyMetric(date = today, weightKilograms = 78.4))
+
+        assertEquals(78.4, MetricsStore(file).recentDays(1).single().weightKilograms!!, 0.001)
+    }
+
+    @Test
     fun `a file written before calories were renamed still reads`() {
         // 0.6.0 wrote activeCaloriesOHealthKcal; the value is the same measurement.
         file.writeText(

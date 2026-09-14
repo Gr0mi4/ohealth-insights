@@ -650,6 +650,9 @@ class HealthExportEngine(
             (sleeps + workouts.map { TimeWindow(it.start, it.end) }).mapNotNull { clampTo(it, range) },
         )
 
+        // Weight is read here rather than in its own pass: these records are already being walked,
+        // and the daily rows are the only place a reader would look for it.
+        val weights = mutableMapOf<LocalDate, Double>()
         recordTypes.filter { it.type !in windowedTypes }.forEach { spec ->
             exportRecordType(
                 writer = writer,
@@ -660,6 +663,18 @@ class HealthExportEngine(
                 granted = granted,
                 states = states,
                 writtenRecordIds = writtenRecordIds,
+                onRecord = { record ->
+                    if (record is WeightRecord) {
+                        val date = HealthMetrics.localDateOf(record.time, record.zoneOffset)
+                        // OHealth wins the day when it measured one; otherwise any scale is better
+                        // than a blank, and most recent readings come from elsewhere.
+                        val fromOHealth =
+                            record.metadata.dataOrigin.packageName == ohealthPackage
+                        if (fromOHealth || date !in weights) {
+                            weights[date] = record.weight.inKilograms
+                        }
+                    }
+                },
             )
         }
 
@@ -771,6 +786,7 @@ class HealthExportEngine(
             label = label,
             granted = granted,
             calories = calories,
+            weights = weights,
             writtenDailyDates = writtenDailyDates,
             reportCollector = reportCollector,
         )
@@ -790,6 +806,7 @@ class HealthExportEngine(
         label: String,
         granted: Set<String>,
         calories: CalorieSamples,
+        weights: Map<LocalDate, Double>,
         writtenDailyDates: MutableSet<LocalDate>,
         reportCollector: ReportCollector?,
     ): Long {
@@ -839,21 +856,31 @@ class HealthExportEngine(
             candidates = deduplicatedSteps.keys + ohealthSteps.keys + caloriesByDate.keys,
         )
             .forEach { date ->
-            if (!writtenDailyDates.add(date)) return@forEach
             val stepsTotal = deduplicatedSteps[date]?.result
             val daySamples = caloriesByDate[date].orEmpty()
-            val caloriesOHealthKcal = if (daySamples.isEmpty()) {
-                null
-            } else {
-                daySamples.sumOf { it.kilocalories }
-            }
-            val calorieCoveredMinutes = daySamples.sumOf { it.minutes }
+            val stepsTotalCount = stepsTotal?.get(StepsRecord.COUNT_TOTAL)
+            val stepsOHealthCount = ohealthSteps[date]?.result?.get(StepsRecord.COUNT_TOTAL)
+
+            // Aggregation returns a bucket for every day in the window, empty ones included, so the
+            // key set covers dates the watch did not exist for. A row for such a day is not a
+            // measurement of nothing - it is the absence of a measurement, and writing zeros for it
+            // invites a reader to conclude the watch was worn for no minutes and no workout
+            // happened.
+            val hasObservation =
+                stepsTotalCount != null || stepsOHealthCount != null || daySamples.isNotEmpty()
+            if (!hasObservation) return@forEach
+            if (!writtenDailyDates.add(date)) return@forEach
+
+            val caloriesOHealthKcal = daySamples.takeIf { it.isNotEmpty() }?.sumOf { it.kilocalories }
+            val calorieCoveredMinutes = daySamples.takeIf { it.isNotEmpty() }?.sumOf { it.minutes }
+            val weightKilograms = weights[date]
             writer.writeJsonLine(
                 jsonObject(
                     "kind" to "daily_activity",
                     "date" to date.toString(),
-                    "stepsTotalDeduplicated" to stepsTotal?.get(StepsRecord.COUNT_TOTAL),
-                    "stepsOHealth" to ohealthSteps[date]?.result?.get(StepsRecord.COUNT_TOTAL),
+                    "stepsTotalDeduplicated" to stepsTotalCount,
+                    "stepsOHealth" to stepsOHealthCount,
+                    "weightKilograms" to weightKilograms,
                     "caloriesOHealthKcal" to caloriesOHealthKcal,
                     "caloriesOHealthRecordType" to calories.recordType,
                     "caloriesOHealthRecordCount" to daySamples.size,
@@ -866,8 +893,9 @@ class HealthExportEngine(
             )
             reportCollector?.onDailyActivity(
                 date = date,
-                stepsTotal = stepsTotal?.get(StepsRecord.COUNT_TOTAL),
-                stepsOHealth = ohealthSteps[date]?.result?.get(StepsRecord.COUNT_TOTAL),
+                stepsTotal = stepsTotalCount,
+                stepsOHealth = stepsOHealthCount,
+                weightKilograms = weightKilograms,
                 caloriesOHealthKcal = caloriesOHealthKcal,
                 caloriesCoveredMinutes = calorieCoveredMinutes,
             )

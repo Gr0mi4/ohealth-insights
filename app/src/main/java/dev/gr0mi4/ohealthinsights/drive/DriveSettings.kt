@@ -43,10 +43,13 @@ class DriveSettingsStore(context: Context) {
             "ohealth-raw-{syncMode}-{timestamp}.ndjson.gz",
         ) ?: "ohealth-raw-{syncMode}-{timestamp}.ndjson.gz",
         updateLatestReport = prefs.getBoolean(KEY_UPDATE_LATEST, true),
-        latestReportName = prefs.getString(KEY_LATEST_REPORT, "ohealth-latest-report.md")
-            ?: "ohealth-latest-report.md",
-        latestCsvName = prefs.getString(KEY_LATEST_CSV, "ohealth-latest-metrics.csv")
-            ?: "ohealth-latest-metrics.csv",
+        // The names changed when the dated copies went away. An install that had already saved the
+        // old ones kept using them, so the rename never reached anybody; a stored value is adopted
+        // only when it is not simply the former default.
+        latestReportName = prefs.getString(KEY_LATEST_REPORT, null)
+            ?.takeUnless { it == LEGACY_LATEST_REPORT } ?: "ohealth-report.md",
+        latestCsvName = prefs.getString(KEY_LATEST_CSV, null)
+            ?.takeUnless { it == LEGACY_LATEST_CSV } ?: "ohealth-metrics.csv",
         changeLogName = prefs.getString(KEY_CHANGE_LOG, "ohealth-changes.csv")
             ?: "ohealth-changes.csv",
         googleAccountEmail = prefs.getString(KEY_ACCOUNT_EMAIL, null),
@@ -126,6 +129,8 @@ class DriveSettingsStore(context: Context) {
         private const val KEY_LATEST_REPORT = "latest_report_name"
         private const val KEY_LATEST_CSV = "latest_csv_name"
         private const val KEY_CHANGE_LOG = "change_log_name"
+        private const val LEGACY_LATEST_REPORT = "ohealth-latest-report.md"
+        private const val LEGACY_LATEST_CSV = "ohealth-latest-metrics.csv"
         private const val KEY_ACCOUNT_EMAIL = "account_email"
         private const val KEY_ROOT_FOLDER_ID = "root_folder_id"
         private const val KEY_REPORTS_FOLDER_ID = "reports_folder_id"

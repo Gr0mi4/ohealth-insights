@@ -87,7 +87,7 @@ class ReportBuilder(
      * comparison can come from.
      */
     fun buildCsv(): String = buildString {
-        appendLine("date,steps_total,steps_ohealth,calories_ohealth_kcal,calories_covered_minutes,workout_count,workout_calories_ohealth_kcal,time_in_bed_minutes,awakenings_estimated")
+        appendLine("date,steps_total,steps_ohealth,calories_ohealth_kcal,calories_covered_minutes,workout_count,workout_calories_ohealth_kcal,time_in_bed_minutes,awakenings_estimated,weight_kg")
         metricsStore.allMetrics().forEach { day ->
             appendLine(
                 listOf(
@@ -100,6 +100,7 @@ class ReportBuilder(
                     day.workoutCaloriesKcal?.toString() ?: "",
                     day.sleepMinutes?.toString() ?: "",
                     day.awakenings?.toString() ?: "",
+                    day.weightKilograms?.toString() ?: "",
                 ).joinToString(","),
             )
         }

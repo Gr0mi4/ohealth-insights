@@ -8,9 +8,17 @@ This document defines how generated OHealth Insights reports should be interpret
    sync. It is the only file to read for trends; there are no dated copies to stitch together.
 2. `ohealth-report.md` is a human-readable view of the last 14 days plus this contract.
 3. `ohealth-changes.csv` lists days whose stored value was later replaced by a different one, with
-   both values and when it happened. A value appearing where there was none is not a change. Use it
-   before concluding that a figure moved for a physiological reason.
-4. `Archive/` holds the raw exports plus three generations of the metrics file, roughly a day, a
+   both values and when it happened. A value appearing where there was none is not a change, and
+   neither is the current day moving as it goes along - only a day that had already ended is
+   recorded. Use it before concluding that a figure moved for a physiological reason.
+4. A day with no observation at all is not written. Health Connect's aggregation returns a bucket
+   for every day in a window, empty ones included, so rows once existed for dates predating the
+   watch. Absence of a measurement is never reported as a zero: a row exists only when something
+   was actually recorded, and a field is blank rather than 0 when that particular thing was not.
+5. `weight_kg` carries the day's weight, preferring an OHealth reading and otherwise taking whichever
+   source measured it. Weight is a scale reading rather than a derived aggregate, so mixing sources
+   risks only a disagreement between scales, not the double counting that made calories unusable.
+6. `Archive/` holds the raw exports plus three generations of the metrics file, roughly a day, a
    week and a month old.
 
 ## Daily steps
