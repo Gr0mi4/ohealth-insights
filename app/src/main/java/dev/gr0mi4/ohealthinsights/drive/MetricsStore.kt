@@ -20,6 +20,7 @@ data class DailyMetric(
     val stepsOHealth: Long? = null,
     val caloriesOHealthKcal: Double? = null,
     val caloriesCoveredMinutes: Long? = null,
+    val weightKilograms: Double? = null,
     val workoutCalories: Map<String, Double?> = emptyMap(),
     val timeInBedMinutes: Map<String, Long> = emptyMap(),
     val sleepAwakenings: Map<String, Int> = emptyMap(),
@@ -124,6 +125,10 @@ class MetricsStore(private val file: java.io.File) {
      */
     private fun recordChanges(existing: DailyMetric?, incoming: DailyMetric) {
         if (existing == null) return
+        // A day still in progress moves every sync - steps went 4824, 4835, 4837, 4844 in one
+        // afternoon - and none of that is a correction. Only a finished day changing is worth a
+        // line, or the log fills with the present.
+        if (!incoming.date.isBefore(LocalDate.now())) return
         val at = Instant.now()
         fun note(field: String, before: Any?, after: Any?) {
             if (before == null || after == null || before == after) return
@@ -133,6 +138,7 @@ class MetricsStore(private val file: java.io.File) {
         note("stepsOHealth", existing.stepsOHealth, incoming.stepsOHealth)
         note("caloriesOHealthKcal", existing.caloriesOHealthKcal, incoming.caloriesOHealthKcal)
         note("caloriesCoveredMinutes", existing.caloriesCoveredMinutes, incoming.caloriesCoveredMinutes)
+        note("weightKilograms", existing.weightKilograms, incoming.weightKilograms)
     }
 
     fun changeLog(): List<MetricChange> = synchronized(lock) {
@@ -177,6 +183,7 @@ class MetricsStore(private val file: java.io.File) {
             stepsOHealth = metric.stepsOHealth ?: existing?.stepsOHealth,
             caloriesOHealthKcal = metric.caloriesOHealthKcal ?: existing?.caloriesOHealthKcal,
             caloriesCoveredMinutes = metric.caloriesCoveredMinutes ?: existing?.caloriesCoveredMinutes,
+            weightKilograms = metric.weightKilograms ?: existing?.weightKilograms,
             updatedAt = metric.updatedAt,
         )
     }
@@ -265,6 +272,7 @@ class MetricsStore(private val file: java.io.File) {
         stepsOHealth?.let { put("stepsOHealth", it) }
         caloriesOHealthKcal?.let { put("caloriesOHealthKcal", it) }
         caloriesCoveredMinutes?.let { put("caloriesCoveredMinutes", it) }
+        weightKilograms?.let { put("weightKilograms", it) }
         put("workoutCalories", JSONObject(workoutCalories.mapValues { it.value ?: JSONObject.NULL }))
         put("timeInBedMinutes", JSONObject(timeInBedMinutes))
         put("sleepAwakenings", JSONObject(sleepAwakenings))
@@ -278,6 +286,7 @@ class MetricsStore(private val file: java.io.File) {
         caloriesOHealthKcal = optDoubleOrNull("caloriesOHealthKcal")
             ?: optDoubleOrNull("activeCaloriesOHealthKcal"),
         caloriesCoveredMinutes = optLongOrNull("caloriesCoveredMinutes"),
+        weightKilograms = optDoubleOrNull("weightKilograms"),
         // Files written before sessions were keyed hold only totals, which cannot be attributed to
         // sessions after the fact. Those days read back empty and refill on the next sync.
         workoutCalories = optJSONObject("workoutCalories").toDoubleMap(),
@@ -339,6 +348,7 @@ class ReportCollector(
         stepsOHealth: Long?,
         caloriesOHealthKcal: Double?,
         caloriesCoveredMinutes: Long?,
+        weightKilograms: Double?,
     ) {
         metricsStore.upsertDaily(
             DailyMetric(
@@ -347,6 +357,7 @@ class ReportCollector(
                 stepsOHealth = stepsOHealth,
                 caloriesOHealthKcal = caloriesOHealthKcal,
                 caloriesCoveredMinutes = caloriesCoveredMinutes,
+                weightKilograms = weightKilograms,
             ),
         )
     }
