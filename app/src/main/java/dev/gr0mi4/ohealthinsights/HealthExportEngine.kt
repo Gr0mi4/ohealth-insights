@@ -23,6 +23,8 @@ import androidx.health.connect.client.records.ExerciseSessionRecord
 import androidx.health.connect.client.records.FloorsClimbedRecord
 import androidx.health.connect.client.records.HeartRateRecord
 import androidx.health.connect.client.records.HeartRateVariabilityRmssdRecord
+import androidx.health.connect.client.records.InstantaneousRecord
+import androidx.health.connect.client.records.IntervalRecord
 import androidx.health.connect.client.records.HeightRecord
 import androidx.health.connect.client.records.HydrationRecord
 import androidx.health.connect.client.records.IntermenstrualBleedingRecord
@@ -138,7 +140,7 @@ class HealthExportEngine(
             writer.writeJsonLine(
                 jsonObject(
                     "kind" to "manifest",
-                    "schemaVersion" to 3,
+                    "schemaVersion" to 4,
                     "appVersion" to BuildConfig.VERSION_NAME,
                     "syncMode" to plan.mode.wireName,
                     "exportedAt" to exportedAt.toString(),
@@ -1221,10 +1223,122 @@ class HealthExportEngine(
                 "lastModifiedTime" to record.metadata.lastModifiedTime.toString(),
                 "clientRecordId" to record.metadata.clientRecordId,
                 "clientRecordVersion" to record.metadata.clientRecordVersion,
-                "payload" to record.toString(),
+                *recordFields(record).toTypedArray(),
             ),
         )
         return true
+    }
+
+    /**
+     * The record's own fields, rather than its `toString()`.
+     *
+     * `toString()` was cheap to write and expensive everywhere else: it rendered every sample of a
+     * series record into one string - a full history holds 1.2 million heart-rate samples - and it
+     * left the only machine-readable form of the data a blob that had to be parsed with regular
+     * expressions, against a format no contract covers and a library is free to change.
+     *
+     * Types with no branch below carry no data in this export; they fall back to the blob so
+     * nothing is silently lost if one of them ever starts arriving.
+     */
+    private fun recordFields(record: Record): List<Pair<String, Any?>> = buildList {
+        when (record) {
+            is InstantaneousRecord -> {
+                add("time" to record.time.toString())
+                add("zoneOffset" to record.zoneOffset?.toString())
+            }
+
+            is IntervalRecord -> {
+                add("startTime" to record.startTime.toString())
+                add("startZoneOffset" to record.startZoneOffset?.toString())
+                add("endTime" to record.endTime.toString())
+                add("endZoneOffset" to record.endZoneOffset?.toString())
+            }
+        }
+        when (record) {
+            is ActiveCaloriesBurnedRecord -> add("energyKcal" to record.energy.inKilocalories)
+            is TotalCaloriesBurnedRecord -> add("energyKcal" to record.energy.inKilocalories)
+            is BasalMetabolicRateRecord ->
+                add("basalMetabolicRateKcalPerDay" to record.basalMetabolicRate.inKilocaloriesPerDay)
+
+            is StepsRecord -> add("count" to record.count)
+            is DistanceRecord -> add("distanceMeters" to record.distance.inMeters)
+            is ElevationGainedRecord -> add("elevationMeters" to record.elevation.inMeters)
+            is FloorsClimbedRecord -> add("floors" to record.floors)
+            is HeightRecord -> add("heightMeters" to record.height.inMeters)
+            is WeightRecord -> add("weightKilograms" to record.weight.inKilograms)
+            is RestingHeartRateRecord -> add("beatsPerMinute" to record.beatsPerMinute)
+            is RespiratoryRateRecord -> add("rate" to record.rate)
+            is OxygenSaturationRecord -> add("percentage" to record.percentage.value)
+
+            is HeartRateRecord -> {
+                add("sampleCount" to record.samples.size)
+                add(
+                    "samples" to RawJson(
+                        record.samples.joinToString(",", "[", "]") { sample ->
+                            jsonObject(
+                                "time" to sample.time.toString(),
+                                "beatsPerMinute" to sample.beatsPerMinute,
+                            )
+                        },
+                    ),
+                )
+            }
+
+            is SpeedRecord -> {
+                add("sampleCount" to record.samples.size)
+                add(
+                    "samples" to RawJson(
+                        record.samples.joinToString(",", "[", "]") { sample ->
+                            jsonObject(
+                                "time" to sample.time.toString(),
+                                "metersPerSecond" to sample.speed.inMetersPerSecond,
+                            )
+                        },
+                    ),
+                )
+            }
+
+            is StepsCadenceRecord -> {
+                add("sampleCount" to record.samples.size)
+                add(
+                    "samples" to RawJson(
+                        record.samples.joinToString(",", "[", "]") { sample ->
+                            jsonObject(
+                                "time" to sample.time.toString(),
+                                "rate" to sample.rate,
+                            )
+                        },
+                    ),
+                )
+            }
+
+            is ExerciseSessionRecord -> {
+                add("exerciseType" to record.exerciseType)
+                add("title" to record.title)
+                add("notes" to record.notes)
+                add("segmentCount" to record.segments.size)
+                add("lapCount" to record.laps.size)
+            }
+
+            is SleepSessionRecord -> {
+                add("title" to record.title)
+                add("notes" to record.notes)
+                add("stageCount" to record.stages.size)
+                add(
+                    "stages" to RawJson(
+                        record.stages.joinToString(",", "[", "]") { stage ->
+                            jsonObject(
+                                "startTime" to stage.startTime.toString(),
+                                "endTime" to stage.endTime.toString(),
+                                "stage" to stage.stage,
+                            )
+                        },
+                    ),
+                )
+            }
+
+            else -> add("payload" to record.toString())
+        }
     }
 
     private fun recordBounds(record: Record): TimeWindow? {
@@ -1468,9 +1582,13 @@ private fun jsonObject(vararg fields: Pair<String, Any?>): String = fields.joinT
     separator = ",",
 ) { (key, value) -> "${jsonString(key)}:${jsonValue(value)}" }
 
+/** Already-encoded JSON, emitted verbatim so nested arrays do not have to be escaped. */
+private class RawJson(val text: String)
+
 private fun jsonValue(value: Any?): String = when (value) {
     null -> "null"
     is Boolean, is Number -> value.toString()
+    is RawJson -> value.text
     else -> jsonString(value.toString())
 }
 
