@@ -31,8 +31,20 @@ class SnapshotRotationTest {
     }
 
     @Test
-    fun `a second sync on the same day changes nothing`() {
-        assertEquals(emptyList<Action>(), plan(daily = now.minus(3, ChronoUnit.HOURS)))
+    fun `a second sync on the same day changes nothing once every generation exists`() {
+        assertEquals(
+            emptyList<Action>(),
+            plan(daily = now.minus(3, ChronoUnit.HOURS), weekly = daysAgo(2), monthly = daysAgo(10)),
+        )
+    }
+
+    @Test
+    fun `a generation that does not exist yet is seeded from the one below it`() {
+        // The youngest is fresh, so it is not rewritten - but there is no weekly copy to age into.
+        assertEquals(
+            listOf(Action.Promote(from = SnapshotRotation.DAILY, to = SnapshotRotation.WEEKLY)),
+            plan(daily = now.minus(3, ChronoUnit.HOURS)),
+        )
     }
 
     @Test
