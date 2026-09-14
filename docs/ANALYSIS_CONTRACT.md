@@ -12,11 +12,34 @@ This document defines how generated OHealth Insights reports should be interpret
 
 ## Calories
 
-1. `activeCaloriesOHealthKcal` is the only canonical calorie value in generated reports.
-2. It is aggregated from `ActiveCaloriesBurnedRecord` records written by `com.heytap.health.international`.
-3. It excludes basal/resting energy and calorie estimates written by Google Fit or other apps.
-4. Workout calorie values use the same OHealth-only active-calorie source.
-5. A current-day calorie value may be partial when synchronization runs before the local day ends.
+1. `caloriesOHealthKcal` is the only canonical calorie value in generated reports.
+2. It is the sum of calorie records written by `com.heytap.health.international`, read directly.
+   Health Connect aggregation is deliberately not used: it fills every minute no record covers with
+   energy derived from basal metabolic rate, and the data origin filter does not remove that filler
+   because derived energy belongs to no origin. On a typical day the filler exceeded the measured
+   value, inflating roughly 900 kcal to roughly 2100.
+3. Records are bucketed by the local calendar day of their own `startZoneOffset`, not by UTC.
+4. OHealth writes each workout twice, as per-minute records and as one summary record spanning the
+   session. Any record whose span strictly contains another record's span is dropped, so a session
+   is counted once. 188 of 524 days were affected before this rule existed.
+5. The resulting value matches the active-calorie figure shown in the OHealth app, verified to the
+   kilocalorie on several days.
+6. OHealth publishes no `ActiveCaloriesBurnedRecord` at all; its `TotalCaloriesBurnedRecord` data is
+   what the app presents as active calories. `caloriesOHealthRecordType` names the type actually
+   used, and active records are still preferred should they ever appear.
+7. Data written by Google Fit or other apps is never included.
+8. `caloriesOHealthCoveredMinutes` is how many minutes of the day carry a record. It measures wrist
+   time, not activity: a day with 300 covered minutes and one with 900 are not comparable, and a low
+   figure must never be read as a sedentary day.
+9. A current-day calorie value may be partial when synchronization runs before the local day ends.
+
+## Sleep
+
+1. `sleepMinutes` is time actually asleep: awake stages inside the session window are excluded, which
+   is what the OHealth app shows.
+2. When Health Connect carries no stages for a session, the full time-in-bed window is used instead.
+   That value reads higher than the app and is not comparable with staged nights.
+3. Sessions are keyed by record id, so a night re-read by two overlapping ranges is counted once.
 
 ## Exercise sessions versus training sessions
 
@@ -64,7 +87,7 @@ User-confirmed ground truth overrides heuristic classification and should be use
 
 ## Report behavior
 
-Generated Markdown/CSV reports should expose a canonical step count based on `stepsOHealth ?: stepsTotal`, while retaining both raw step fields for diagnostics. They should expose only OHealth-origin active calories and must not include cross-source total-calorie aggregates.
+Generated Markdown/CSV reports should expose a canonical step count based on `stepsOHealth ?: stepsTotal`, while retaining both raw step fields for diagnostics. They should expose only OHealth-origin calories summed from records, must not include cross-source calorie aggregates, and must carry the covered-minutes figure alongside every calorie value.
 
 Until a full semantic classifier is implemented, reports should include this contract (or a concise embedded version) so downstream ChatGPT analysis does not treat raw exercise records as literal workout counts.
 

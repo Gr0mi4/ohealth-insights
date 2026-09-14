@@ -6,16 +6,32 @@ import java.time.temporal.ChronoUnit
 import org.json.JSONArray
 import org.json.JSONObject
 
+/**
+ * Workouts and sleep are stored keyed by session rather than accumulated.
+ *
+ * A range can legitimately be exported more than once - a retry, an overlap recovery, or a session
+ * that straddles a chunk boundary - and counters that added on every pass grew without bound, so
+ * the report and CSV handed to ChatGPT claimed workouts and sleep the user never had.
+ */
 data class DailyMetric(
     val date: LocalDate,
     val stepsTotal: Long? = null,
     val stepsOHealth: Long? = null,
-    val activeCaloriesOHealthKcal: Double? = null,
-    val workoutCount: Int = 0,
-    val workoutCaloriesKcal: Double? = null,
-    val sleepMinutes: Long? = null,
+    val caloriesOHealthKcal: Double? = null,
+    val caloriesCoveredMinutes: Long? = null,
+    val workoutCalories: Map<String, Double?> = emptyMap(),
+    val sleepSessionMinutes: Map<String, Long> = emptyMap(),
     val updatedAt: Instant = Instant.now(),
-)
+) {
+    val workoutCount: Int
+        get() = workoutCalories.size
+
+    val workoutCaloriesKcal: Double?
+        get() = workoutCalories.values.filterNotNull().takeIf { it.isNotEmpty() }?.sum()
+
+    val sleepMinutes: Long?
+        get() = sleepSessionMinutes.values.takeIf { it.isNotEmpty() }?.sum()
+}
 
 data class WorkoutMetric(
     val sessionId: String,
@@ -34,12 +50,12 @@ class MetricsStore(context: android.content.Context) {
             val metrics = loadAll().toMutableMap()
             val existing = metrics[metric.date]
             metrics[metric.date] = metric.copy(
-                workoutCount = maxOf(existing?.workoutCount ?: 0, metric.workoutCount),
-                workoutCaloriesKcal = metric.workoutCaloriesKcal ?: existing?.workoutCaloriesKcal,
-                sleepMinutes = metric.sleepMinutes ?: existing?.sleepMinutes,
+                workoutCalories = existing?.workoutCalories ?: emptyMap(),
+                sleepSessionMinutes = existing?.sleepSessionMinutes ?: emptyMap(),
                 stepsTotal = metric.stepsTotal ?: existing?.stepsTotal,
                 stepsOHealth = metric.stepsOHealth ?: existing?.stepsOHealth,
-                activeCaloriesOHealthKcal = metric.activeCaloriesOHealthKcal ?: existing?.activeCaloriesOHealthKcal,
+                caloriesOHealthKcal = metric.caloriesOHealthKcal ?: existing?.caloriesOHealthKcal,
+                caloriesCoveredMinutes = metric.caloriesCoveredMinutes ?: existing?.caloriesCoveredMinutes,
                 updatedAt = metric.updatedAt,
             )
             prune(metrics)
@@ -48,13 +64,12 @@ class MetricsStore(context: android.content.Context) {
     }
 
     fun addWorkout(date: LocalDate, workout: WorkoutMetric) {
+        val key = workout.sessionId.ifEmpty { "${workout.startTime}|${workout.endTime}" }
         synchronized(lock) {
             val metrics = loadAll().toMutableMap()
             val existing = metrics[date] ?: DailyMetric(date = date)
-            val addedCalories = (existing.workoutCaloriesKcal ?: 0.0) + (workout.caloriesKcal ?: 0.0)
             metrics[date] = existing.copy(
-                workoutCount = existing.workoutCount + 1,
-                workoutCaloriesKcal = if (workout.caloriesKcal != null) addedCalories else existing.workoutCaloriesKcal,
+                workoutCalories = existing.workoutCalories + (key to workout.caloriesKcal),
                 updatedAt = Instant.now(),
             )
             prune(metrics)
@@ -62,12 +77,12 @@ class MetricsStore(context: android.content.Context) {
         }
     }
 
-    fun addSleepMinutes(date: LocalDate, minutes: Long) {
+    fun addSleepSession(date: LocalDate, key: String, minutes: Long) {
         synchronized(lock) {
             val metrics = loadAll().toMutableMap()
             val existing = metrics[date] ?: DailyMetric(date = date)
             metrics[date] = existing.copy(
-                sleepMinutes = (existing.sleepMinutes ?: 0L) + minutes,
+                sleepSessionMinutes = existing.sleepSessionMinutes + (key to minutes),
                 updatedAt = Instant.now(),
             )
             prune(metrics)
@@ -120,10 +135,10 @@ class MetricsStore(context: android.content.Context) {
         put("date", date.toString())
         stepsTotal?.let { put("stepsTotal", it) }
         stepsOHealth?.let { put("stepsOHealth", it) }
-        activeCaloriesOHealthKcal?.let { put("activeCaloriesOHealthKcal", it) }
-        put("workoutCount", workoutCount)
-        workoutCaloriesKcal?.let { put("workoutCaloriesKcal", it) }
-        sleepMinutes?.let { put("sleepMinutes", it) }
+        caloriesOHealthKcal?.let { put("caloriesOHealthKcal", it) }
+        caloriesCoveredMinutes?.let { put("caloriesCoveredMinutes", it) }
+        put("workoutCalories", JSONObject(workoutCalories.mapValues { it.value ?: JSONObject.NULL }))
+        put("sleepSessionMinutes", JSONObject(sleepSessionMinutes))
         put("updatedAt", updatedAt.toString())
     }
 
@@ -131,12 +146,27 @@ class MetricsStore(context: android.content.Context) {
         date = LocalDate.parse(getString("date")),
         stepsTotal = optLongOrNull("stepsTotal"),
         stepsOHealth = optLongOrNull("stepsOHealth"),
-        activeCaloriesOHealthKcal = optDoubleOrNull("activeCaloriesOHealthKcal"),
-        workoutCount = optInt("workoutCount", 0),
-        workoutCaloriesKcal = optDoubleOrNull("workoutCaloriesKcal"),
-        sleepMinutes = optLongOrNull("sleepMinutes"),
+        caloriesOHealthKcal = optDoubleOrNull("caloriesOHealthKcal")
+            ?: optDoubleOrNull("activeCaloriesOHealthKcal"),
+        caloriesCoveredMinutes = optLongOrNull("caloriesCoveredMinutes"),
+        // Files written before sessions were keyed hold only totals, which cannot be attributed to
+        // sessions after the fact. Those days read back empty and refill on the next sync.
+        workoutCalories = optJSONObject("workoutCalories").toDoubleMap(),
+        sleepSessionMinutes = optJSONObject("sleepSessionMinutes").toLongMap(),
         updatedAt = runCatching { Instant.parse(getString("updatedAt")) }.getOrElse { Instant.now() },
     )
+
+    private fun JSONObject?.toDoubleMap(): Map<String, Double?> {
+        if (this == null) return emptyMap()
+        return keys().asSequence().associateWith { key ->
+            if (isNull(key)) null else optDouble(key)
+        }
+    }
+
+    private fun JSONObject?.toLongMap(): Map<String, Long> {
+        if (this == null) return emptyMap()
+        return keys().asSequence().associateWith { key -> optLong(key) }
+    }
 
     private fun JSONObject.optLongOrNull(key: String): Long? =
         if (has(key) && !isNull(key)) optLong(key) else null
@@ -159,14 +189,16 @@ class ReportCollector(
         date: LocalDate,
         stepsTotal: Long?,
         stepsOHealth: Long?,
-        activeCaloriesOHealthKcal: Double?,
+        caloriesOHealthKcal: Double?,
+        caloriesCoveredMinutes: Long?,
     ) {
         metricsStore.upsertDaily(
             DailyMetric(
                 date = date,
                 stepsTotal = stepsTotal,
                 stepsOHealth = stepsOHealth,
-                activeCaloriesOHealthKcal = activeCaloriesOHealthKcal,
+                caloriesOHealthKcal = caloriesOHealthKcal,
+                caloriesCoveredMinutes = caloriesCoveredMinutes,
             ),
         )
     }
@@ -190,10 +222,16 @@ class ReportCollector(
         metricsStore.addWorkout(date, workout)
     }
 
-    fun onSleepSession(startTime: Instant, endTime: Instant) {
-        val minutes = ChronoUnit.MINUTES.between(startTime, endTime).coerceAtLeast(0)
+    fun onSleepSession(
+        sessionId: String,
+        startTime: Instant,
+        endTime: Instant,
+        actualSleepMinutes: Long?,
+    ) {
+        val timeInBed = ChronoUnit.MINUTES.between(startTime, endTime).coerceAtLeast(0)
         val date = endTime.atZone(zone).toLocalDate()
-        metricsStore.addSleepMinutes(date, minutes)
+        val key = sessionId.ifEmpty { "$startTime|$endTime" }
+        metricsStore.addSleepSession(date, key, actualSleepMinutes ?: timeInBed)
     }
 
     fun sessionWorkouts(): List<WorkoutMetric> = sessionWorkouts.toList()

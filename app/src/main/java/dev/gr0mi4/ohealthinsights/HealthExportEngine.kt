@@ -50,7 +50,6 @@ import androidx.health.connect.client.records.WeightRecord
 import androidx.health.connect.client.records.WheelchairPushesRecord
 import androidx.health.connect.client.records.metadata.DataOrigin
 import androidx.health.connect.client.request.AggregateGroupByPeriodRequest
-import androidx.health.connect.client.request.AggregateRequest
 import androidx.health.connect.client.request.ChangesTokenRequest
 import androidx.health.connect.client.request.ReadRecordsRequest
 import androidx.health.connect.client.time.TimeRangeFilter
@@ -60,8 +59,10 @@ import java.io.File
 import java.time.Instant
 import java.time.LocalDate
 import java.time.LocalDateTime
+import java.time.Duration
 import java.time.Period
 import java.time.ZoneId
+import java.time.ZoneOffset
 import java.time.temporal.ChronoUnit
 import java.util.TreeSet
 import java.util.zip.GZIPOutputStream
@@ -152,7 +153,7 @@ class HealthExportEngine(
                     "rangeCount" to plan.ranges.size,
                     "heartRatePolicy" to "workout_or_sleep_windows",
                     "stepsPolicy" to "daily_deduplicated_and_ohealth",
-                    "caloriesPolicy" to "ohealth_active_only_daily_and_per_workout",
+                    "caloriesPolicy" to "ohealth_records_local_day_summary_deduplicated",
                     "compression" to "gzip",
                     "changesTokenExpired" to plan.changesTokenExpired,
                 ),
@@ -278,19 +279,32 @@ class HealthExportEngine(
             )
         }
 
+        // A type that dies mid-pagination leaves a hole in this export. Advancing the cursor would
+        // hide that hole forever, because an incremental sync only revisits records that change
+        // after the cursor, and the skipped ones never will. Holding the checkpoint back instead
+        // sends the next run through overlap recovery, which re-reads the range.
+        val checkpointHeldBack = !diagnostic && states.values.any { it.error != null }
+
         EngineExportResult(
             rawRecordCount = states.values.sumOf { it.count },
             derivedRecordCount = derivedCount,
             nonEmptyTypes = states.values.count { it.count > 0 },
             syncMode = plan.mode.wireName,
             rangeCount = plan.ranges.size,
-            checkpointToken = if (diagnostic) null else plan.nextChangesToken,
-            checkpointTime = if (diagnostic) null else exportedAt,
+            checkpointToken = if (diagnostic || checkpointHeldBack) null else plan.nextChangesToken,
+            checkpointTime = when {
+                diagnostic -> null
+                checkpointHeldBack -> previousSuccessfulExport
+                else -> exportedAt
+            },
             warnings = buildList {
                 states.forEach { (recordType, state) ->
                     state.error?.let { add("$recordType: ${it.message ?: it.javaClass.simpleName}") }
                 }
-                if (!diagnostic && plan.nextChangesToken == null) {
+                if (checkpointHeldBack) {
+                    add("Checkpoint held back after a read failure; the next sync re-reads this range.")
+                }
+                if (!diagnostic && !checkpointHeldBack && plan.nextChangesToken == null) {
                     add("Incremental cursor unavailable; the next sync will use a $fallbackOverlapDays-day overlap.")
                 }
                 slowStages.maxByOrNull { it.durationMillis }?.let { timing ->
@@ -611,7 +625,12 @@ class HealthExportEngine(
             onRecord = { record ->
                 if (record is SleepSessionRecord) {
                     sleeps += TimeWindow(record.startTime, record.endTime)
-                    reportCollector?.onSleepSession(record.startTime, record.endTime)
+                    reportCollector?.onSleepSession(
+                        sessionId = record.metadata.id,
+                        startTime = record.startTime,
+                        endTime = record.endTime,
+                        actualSleepMinutes = actualSleepMinutes(record),
+                    )
                 }
             },
         )
@@ -686,7 +705,8 @@ class HealthExportEngine(
     ): Long {
         val canReadSteps = HealthPermission.getReadPermission(StepsRecord::class) in granted
         val canReadActiveCalories = HealthPermission.getReadPermission(ActiveCaloriesBurnedRecord::class) in granted
-        if (!canReadSteps && !canReadActiveCalories) return 0
+        val canReadTotalCalories = HealthPermission.getReadPermission(TotalCaloriesBurnedRecord::class) in granted
+        if (!canReadSteps && !canReadActiveCalories && !canReadTotalCalories) return 0
 
         val zone = ZoneId.systemDefault()
         val localStart = LocalDateTime.ofInstant(range.start, zone).toLocalDate().atStartOfDay()
@@ -726,42 +746,39 @@ class HealthExportEngine(
         } else {
             emptyMap()
         }
-        val ohealthActiveCalories = if (canReadActiveCalories) {
-            windows.flatMapIndexed { index, window ->
-                criticalHealthCall("$label OHealth active calories ${index + 1}/${windows.size}") {
-                    client.aggregateGroupByPeriod(
-                        AggregateGroupByPeriodRequest(
-                            metrics = setOf(ActiveCaloriesBurnedRecord.ACTIVE_CALORIES_TOTAL),
-                            timeRangeFilter = TimeRangeFilter.between(window.start, window.end),
-                            timeRangeSlicer = Period.ofDays(1),
-                            dataOriginFilter = setOf(DataOrigin(ohealthPackage)),
-                        ),
-                    )
-                }
-            }.associateBy { it.startTime.toLocalDate() }
-        } else {
-            emptyMap()
-        }
+        val calories = readOHealthCalories(
+            start = localStart.atZone(zone).toInstant(),
+            end = localEnd.atZone(zone).toInstant(),
+            label = "$label calories",
+            canReadActive = canReadActiveCalories,
+            canReadTotal = canReadTotalCalories,
+        )
+        val caloriesByDate = calories.samples.groupBy { it.localDate }
 
         var written = 0L
-        (deduplicatedSteps.keys + ohealthSteps.keys + ohealthActiveCalories.keys).toSortedSet().forEach { date ->
+        (deduplicatedSteps.keys + ohealthSteps.keys + caloriesByDate.keys)
+            .toSortedSet()
+            .forEach { date ->
             if (!writtenDailyDates.add(date)) return@forEach
             val stepsTotal = deduplicatedSteps[date]?.result
-            val activeOHealth = ohealthActiveCalories[date]?.result
+            val daySamples = caloriesByDate[date].orEmpty()
+            val caloriesOHealthKcal = if (daySamples.isEmpty()) {
+                null
+            } else {
+                daySamples.sumOf { it.kilocalories }
+            }
+            val calorieCoveredMinutes = daySamples.sumOf { it.minutes }
             writer.writeJsonLine(
                 jsonObject(
                     "kind" to "daily_activity",
                     "date" to date.toString(),
                     "stepsTotalDeduplicated" to stepsTotal?.get(StepsRecord.COUNT_TOTAL),
                     "stepsOHealth" to ohealthSteps[date]?.result?.get(StepsRecord.COUNT_TOTAL),
-                    "activeCaloriesOHealthKcal" to activeOHealth
-                        ?.get(ActiveCaloriesBurnedRecord.ACTIVE_CALORIES_TOTAL)
-                        ?.inKilocalories,
+                    "caloriesOHealthKcal" to caloriesOHealthKcal,
+                    "caloriesOHealthRecordType" to calories.recordType,
+                    "caloriesOHealthRecordCount" to daySamples.size,
+                    "caloriesOHealthCoveredMinutes" to calorieCoveredMinutes,
                     "stepsTotalSourcePackages" to stepsTotal?.dataOrigins
-                        ?.map { it.packageName }
-                        ?.sorted()
-                        ?.joinToString(","),
-                    "activeCaloriesOHealthSourcePackages" to activeOHealth?.dataOrigins
                         ?.map { it.packageName }
                         ?.sorted()
                         ?.joinToString(","),
@@ -771,14 +788,163 @@ class HealthExportEngine(
                 date = date,
                 stepsTotal = stepsTotal?.get(StepsRecord.COUNT_TOTAL),
                 stepsOHealth = ohealthSteps[date]?.result?.get(StepsRecord.COUNT_TOTAL),
-                activeCaloriesOHealthKcal = activeOHealth
-                    ?.get(ActiveCaloriesBurnedRecord.ACTIVE_CALORIES_TOTAL)
-                    ?.inKilocalories,
+                caloriesOHealthKcal = caloriesOHealthKcal,
+                caloriesCoveredMinutes = calorieCoveredMinutes,
             )
             written += 1
         }
         writer.flush()
         return written
+    }
+
+    /**
+     * Reads OHealth calorie records directly rather than letting Health Connect aggregate them.
+     *
+     * Aggregation cannot be used here for two independent reasons. Health Connect fills every
+     * minute no record covers with energy derived from basal metabolic rate; on a typical day the
+     * watch covers roughly a third of the day, so the filler outweighed the measurement, and the
+     * data origin filter does not remove it because derived energy belongs to no origin. OHealth
+     * also writes a workout twice, once as per-minute records and once as a single summary record
+     * spanning the whole session, so even a plain sum of the records counts those minutes twice.
+     *
+     * Reading the records and dropping the summaries reproduces the figure the OHealth app shows.
+     */
+    private suspend fun readOHealthCalories(
+        start: Instant,
+        end: Instant,
+        label: String,
+        canReadActive: Boolean,
+        canReadTotal: Boolean,
+    ): CalorieSamples {
+        if (!start.isBefore(end)) return CalorieSamples(emptyList(), null)
+        if (canReadActive) {
+            val active = readCalorieRecords(
+                type = ActiveCaloriesBurnedRecord::class,
+                start = start,
+                end = end,
+                label = "$label (active)",
+            ) { record ->
+                (record as? ActiveCaloriesBurnedRecord)?.let {
+                    CalorieSample(
+                        start = it.startTime,
+                        end = it.endTime,
+                        localDate = localDateOf(it.startTime, it.startZoneOffset),
+                        kilocalories = it.energy.inKilocalories,
+                    )
+                }
+            }
+            if (active.isNotEmpty()) {
+                return CalorieSamples(dropSummaryDuplicates(active), "ActiveCaloriesBurnedRecord")
+            }
+        }
+        if (canReadTotal) {
+            val total = readCalorieRecords(
+                type = TotalCaloriesBurnedRecord::class,
+                start = start,
+                end = end,
+                label = "$label (total)",
+            ) { record ->
+                (record as? TotalCaloriesBurnedRecord)?.let {
+                    CalorieSample(
+                        start = it.startTime,
+                        end = it.endTime,
+                        localDate = localDateOf(it.startTime, it.startZoneOffset),
+                        kilocalories = it.energy.inKilocalories,
+                    )
+                }
+            }
+            if (total.isNotEmpty()) {
+                return CalorieSamples(dropSummaryDuplicates(total), "TotalCaloriesBurnedRecord")
+            }
+        }
+        return CalorieSamples(emptyList(), null)
+    }
+
+    private suspend fun readCalorieRecords(
+        type: KClass<out Record>,
+        start: Instant,
+        end: Instant,
+        label: String,
+        toSample: (Record) -> CalorieSample?,
+    ): List<CalorieSample> {
+        val samples = mutableListOf<CalorieSample>()
+        var pageToken: String? = null
+        var page = 1
+        do {
+            val response = criticalHealthCall("$label page $page (${samples.size} read)") {
+                client.readRecords(
+                    ReadRecordsRequest(
+                        recordType = type,
+                        timeRangeFilter = TimeRangeFilter.between(start, end),
+                        dataOriginFilter = setOf(DataOrigin(ohealthPackage)),
+                        pageSize = readPageSize,
+                        pageToken = pageToken,
+                    ),
+                )
+            }
+            response.records.forEach { record -> toSample(record)?.let(samples::add) }
+            pageToken = response.pageToken
+            page += 1
+        } while (pageToken != null)
+        return samples
+    }
+
+    /**
+     * Drops any record whose span strictly contains another record's span.
+     *
+     * OHealth emits one summary record per workout alongside the per-minute records covering the
+     * same window; keeping both double-counts the session.
+     */
+    private fun dropSummaryDuplicates(samples: List<CalorieSample>): List<CalorieSample> {
+        if (samples.size < 2) return samples
+        val ordered = samples.sortedWith(
+            compareBy<CalorieSample> { it.start }.thenByDescending { it.end },
+        )
+        val kept = ArrayList<CalorieSample>(ordered.size)
+        ordered.forEachIndexed { index, candidate ->
+            val candidateLength = Duration.between(candidate.start, candidate.end)
+            var containsAnother = false
+            var probe = index + 1
+            while (probe < ordered.size && ordered[probe].start < candidate.end) {
+                val other = ordered[probe]
+                if (!other.end.isAfter(candidate.end) &&
+                    Duration.between(other.start, other.end) < candidateLength
+                ) {
+                    containsAnother = true
+                    break
+                }
+                probe += 1
+            }
+            if (!containsAnother) kept += candidate
+        }
+        return kept
+    }
+
+    private fun localDateOf(instant: Instant, offset: ZoneOffset?): LocalDate =
+        if (offset != null) {
+            instant.atOffset(offset).toLocalDate()
+        } else {
+            instant.atZone(ZoneId.systemDefault()).toLocalDate()
+        }
+
+    /**
+     * Minutes actually spent asleep, excluding awake stages inside the session window.
+     *
+     * The session window is time in bed, which is what the previous report counted and why it read
+     * higher than the OHealth app. When Health Connect carries no stages there is no honest way to
+     * recover the asleep duration, so this returns null and the caller keeps the window instead.
+     */
+    private fun actualSleepMinutes(record: SleepSessionRecord): Long? {
+        val asleepStages = record.stages.filter { stage ->
+            stage.stage == SleepSessionRecord.STAGE_TYPE_SLEEPING ||
+                stage.stage == SleepSessionRecord.STAGE_TYPE_LIGHT ||
+                stage.stage == SleepSessionRecord.STAGE_TYPE_DEEP ||
+                stage.stage == SleepSessionRecord.STAGE_TYPE_REM
+        }
+        if (asleepStages.isEmpty()) return null
+        return asleepStages.sumOf { stage ->
+            ChronoUnit.SECONDS.between(stage.startTime, stage.endTime).coerceAtLeast(0)
+        } / 60
     }
 
     private fun dailyAggregationWindows(
@@ -803,23 +969,26 @@ class HealthExportEngine(
         writtenWorkoutEnergyIds: MutableSet<String>,
         reportCollector: ReportCollector?,
     ): Long {
-        if (HealthPermission.getReadPermission(ActiveCaloriesBurnedRecord::class) !in granted) return 0
+        val canReadActiveCalories = HealthPermission.getReadPermission(ActiveCaloriesBurnedRecord::class) in granted
+        val canReadTotalCalories = HealthPermission.getReadPermission(TotalCaloriesBurnedRecord::class) in granted
+        if (!canReadActiveCalories && !canReadTotalCalories) return 0
         var count = 0L
         workouts.forEachIndexed { index, workout ->
             val identity = workout.id.ifEmpty { "${workout.start}|${workout.end}" }
             if (!writtenWorkoutEnergyIds.add(identity)) return@forEachIndexed
             val result = runCatching {
-                criticalHealthCall("$label workout calories ${index + 1}/${workouts.size}") {
-                    client.aggregate(
-                        AggregateRequest(
-                            metrics = setOf(ActiveCaloriesBurnedRecord.ACTIVE_CALORIES_TOTAL),
-                            timeRangeFilter = TimeRangeFilter.between(workout.start, workout.end),
-                            dataOriginFilter = setOf(DataOrigin(ohealthPackage)),
-                        ),
-                    )
-                }
+                readOHealthCalories(
+                    start = workout.start,
+                    end = workout.end,
+                    label = "$label workout calories ${index + 1}/${workouts.size}",
+                    canReadActive = canReadActiveCalories,
+                    canReadTotal = canReadTotalCalories,
+                )
             }
             result.exceptionOrNull()?.let { if (it is CancellationException) throw it }
+            val calories = result.getOrNull()
+            val samples = calories?.samples.orEmpty()
+            val caloriesOHealthKcal = if (samples.isEmpty()) null else samples.sumOf { it.kilocalories }
             writer.writeJsonLine(
                 jsonObject(
                     "kind" to "workout_energy",
@@ -827,9 +996,10 @@ class HealthExportEngine(
                     "startTime" to workout.start.toString(),
                     "endTime" to workout.end.toString(),
                     "title" to workout.title,
-                    "activeCaloriesOHealthKcal" to result.getOrNull()
-                        ?.get(ActiveCaloriesBurnedRecord.ACTIVE_CALORIES_TOTAL)
-                        ?.inKilocalories,
+                    "caloriesOHealthKcal" to caloriesOHealthKcal,
+                    "caloriesOHealthRecordType" to calories?.recordType,
+                    "caloriesOHealthRecordCount" to samples.size,
+                    "caloriesOHealthCoveredMinutes" to samples.sumOf { it.minutes },
                     "status" to if (result.isSuccess) "complete" else "failed",
                     "message" to result.exceptionOrNull()?.message,
                 ),
@@ -839,9 +1009,7 @@ class HealthExportEngine(
                 title = workout.title,
                 startTime = workout.start,
                 endTime = workout.end,
-                caloriesKcal = result.getOrNull()
-                    ?.get(ActiveCaloriesBurnedRecord.ACTIVE_CALORIES_TOTAL)
-                    ?.inKilocalories,
+                caloriesKcal = caloriesOHealthKcal,
             )
             count += 1
         }
@@ -1086,6 +1254,21 @@ class HealthExportEngine(
     private data class TimeWindow(
         val start: Instant,
         val end: Instant,
+    )
+
+    private data class CalorieSample(
+        val start: Instant,
+        val end: Instant,
+        val localDate: LocalDate,
+        val kilocalories: Double,
+    ) {
+        val minutes: Long
+            get() = Duration.between(start, end).toMinutes().coerceAtLeast(1L)
+    }
+
+    private data class CalorieSamples(
+        val samples: List<CalorieSample>,
+        val recordType: String?,
     )
 
     private data class LocalWindow(
