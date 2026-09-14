@@ -588,6 +588,8 @@ class HealthExportEngine(
     ): Long {
         val workouts = mutableListOf<SessionWindow>()
         val sleeps = mutableListOf<TimeWindow>()
+        val sleepSessions = mutableListOf<SessionWindow>()
+        val sleepHeartRate = mutableListOf<HeartRateSample>()
         // Sessions that started before the range still belong to it, so look one day further back.
         val expandedStart = range.start.minus(1, ChronoUnit.DAYS)
 
@@ -625,11 +627,11 @@ class HealthExportEngine(
             onRecord = { record ->
                 if (record is SleepSessionRecord) {
                     sleeps += TimeWindow(record.startTime, record.endTime)
-                    reportCollector?.onSleepSession(
-                        sessionId = record.metadata.id,
-                        startTime = record.startTime,
-                        endTime = record.endTime,
-                        actualSleepMinutes = actualSleepMinutes(record),
+                    sleepSessions += SessionWindow(
+                        id = record.metadata.id,
+                        start = record.startTime,
+                        end = record.endTime,
+                        title = record.title,
                     )
                 }
             },
@@ -663,6 +665,15 @@ class HealthExportEngine(
             granted = granted,
             states = states,
             writtenRecordIds = writtenRecordIds,
+            onRecord = { record ->
+                if (record is HeartRateRecord) {
+                    record.samples.forEach { sample ->
+                        if (sleepSessions.any { !sample.time.isBefore(it.start) && !sample.time.isAfter(it.end) }) {
+                            sleepHeartRate += HeartRateSample(sample.time, sample.beatsPerMinute)
+                        }
+                    }
+                }
+            },
         )
         exportRecordTypeInWindows(
             writer = writer,
@@ -697,6 +708,15 @@ class HealthExportEngine(
             canReadActive = HealthPermission.getReadPermission(ActiveCaloriesBurnedRecord::class) in granted,
             canReadTotal = HealthPermission.getReadPermission(TotalCaloriesBurnedRecord::class) in granted,
         )
+
+        sleepSessions.forEach { session ->
+            reportCollector?.onSleepSession(
+                sessionId = session.id,
+                startTime = session.start,
+                endTime = session.end,
+                awakenings = estimateAwakenings(session, sleepHeartRate),
+            )
+        }
 
         var derived = exportDailyActivity(
             writer = writer,
@@ -938,23 +958,40 @@ class HealthExportEngine(
         }
 
     /**
-     * Minutes actually spent asleep, excluding awake stages inside the session window.
+     * Estimated count of night-time awakenings, from heart rate alone.
      *
-     * The session window is time in bed, which is what the previous report counted and why it read
-     * higher than the OHealth app. When Health Connect carries no stages there is no honest way to
-     * recover the asleep duration, so this returns null and the caller keeps the window instead.
+     * OHealth marks awake segments in its own app and subtracts them from the night, but Health
+     * Connect receives `stages=[]` for every session, so the segmentation is simply not exported.
+     * Heart rate is the only remaining signal, and at roughly one sample every two minutes a short
+     * awakening shows up as one to three slightly raised readings - a few beats above the night's
+     * own baseline, not a spike. This therefore returns an estimate that tracks whether a night was
+     * settled or broken; it cannot reproduce the app's figure and must not be presented as sleep
+     * staging.
+     *
+     * The opening and closing minutes are ignored because falling asleep and waking always raise
+     * heart rate and would otherwise be counted on every night.
      */
-    private fun actualSleepMinutes(record: SleepSessionRecord): Long? {
-        val asleepStages = record.stages.filter { stage ->
-            stage.stage == SleepSessionRecord.STAGE_TYPE_SLEEPING ||
-                stage.stage == SleepSessionRecord.STAGE_TYPE_LIGHT ||
-                stage.stage == SleepSessionRecord.STAGE_TYPE_DEEP ||
-                stage.stage == SleepSessionRecord.STAGE_TYPE_REM
+    private fun estimateAwakenings(session: SessionWindow, samples: List<HeartRateSample>): Int? {
+        val core = samples.filter { sample ->
+            !sample.time.isBefore(session.start.plus(sleepEdgeMinutes, ChronoUnit.MINUTES)) &&
+                sample.time.isBefore(session.end.minus(sleepEdgeMinutes, ChronoUnit.MINUTES))
         }
-        if (asleepStages.isEmpty()) return null
-        return asleepStages.sumOf { stage ->
-            ChronoUnit.SECONDS.between(stage.startTime, stage.endTime).coerceAtLeast(0)
-        } / 60
+        if (core.size < minimumSleepSamples) return null
+        val baseline = core.map { it.beatsPerMinute }.sorted()[core.size / 2]
+        val threshold = baseline + awakeningBeatsAboveBaseline
+        var awakenings = 0
+        var previousElevated: Instant? = null
+        core.sortedBy { it.time }.forEach { sample ->
+            if (sample.beatsPerMinute < threshold) return@forEach
+            val previous = previousElevated
+            if (previous == null ||
+                ChronoUnit.MINUTES.between(previous, sample.time) > awakeningGapMinutes
+            ) {
+                awakenings += 1
+            }
+            previousElevated = sample.time
+        }
+        return awakenings
     }
 
     private fun localDayBounds(range: TimeWindow, zone: ZoneId): Pair<LocalDateTime, LocalDateTime> {
@@ -1033,6 +1070,7 @@ class HealthExportEngine(
         granted: Set<String>,
         states: Map<String, TypeState>,
         writtenRecordIds: BoundedIdSet,
+        onRecord: (Record) -> Unit = {},
     ) {
         if (HealthPermission.getReadPermission(spec.type) !in granted) return
         windows.forEachIndexed { index, window ->
@@ -1048,6 +1086,7 @@ class HealthExportEngine(
                 states = states,
                 writtenRecordIds = writtenRecordIds,
                 predicate = { record -> overlaps(record, window) },
+                onRecord = onRecord,
             )
         }
     }
@@ -1264,6 +1303,11 @@ class HealthExportEngine(
         val end: Instant,
     )
 
+    private data class HeartRateSample(
+        val time: Instant,
+        val beatsPerMinute: Long,
+    )
+
     private data class CalorieSample(
         val start: Instant,
         val end: Instant,
@@ -1318,6 +1362,13 @@ class HealthExportEngine(
         private const val logTag = "OHealthExport"
         private const val ohealthPackage = "com.heytap.health.international"
         private const val readPageSize = 1_000
+
+        // Awakening estimation. The threshold is deliberately low: measured nights sit within a few
+        // beats of their own baseline, so a conventional spike rule would report nothing at all.
+        private const val sleepEdgeMinutes = 10L
+        private const val minimumSleepSamples = 20
+        private const val awakeningBeatsAboveBaseline = 6
+        private const val awakeningGapMinutes = 6L
         private const val rangeChunkDays = 30L
         private const val dailyAggregationChunkDays = 45L
         private const val windowLookbackMinutes = 60L

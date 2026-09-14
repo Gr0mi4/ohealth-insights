@@ -20,7 +20,8 @@ data class DailyMetric(
     val caloriesOHealthKcal: Double? = null,
     val caloriesCoveredMinutes: Long? = null,
     val workoutCalories: Map<String, Double?> = emptyMap(),
-    val sleepSessionMinutes: Map<String, Long> = emptyMap(),
+    val timeInBedMinutes: Map<String, Long> = emptyMap(),
+    val sleepAwakenings: Map<String, Int> = emptyMap(),
     val updatedAt: Instant = Instant.now(),
 ) {
     val workoutCount: Int
@@ -29,8 +30,15 @@ data class DailyMetric(
     val workoutCaloriesKcal: Double?
         get() = workoutCalories.values.filterNotNull().takeIf { it.isNotEmpty() }?.sum()
 
+    /**
+     * Time in bed, not time asleep. OHealth subtracts the awake segments it marks in its own app,
+     * which Health Connect never receives, so this reads a little higher than the watch shows.
+     */
     val sleepMinutes: Long?
-        get() = sleepSessionMinutes.values.takeIf { it.isNotEmpty() }?.sum()
+        get() = timeInBedMinutes.values.takeIf { it.isNotEmpty() }?.sum()
+
+    val awakenings: Int?
+        get() = sleepAwakenings.values.takeIf { it.isNotEmpty() }?.sum()
 }
 
 data class WorkoutMetric(
@@ -51,7 +59,8 @@ class MetricsStore(context: android.content.Context) {
             val existing = metrics[metric.date]
             metrics[metric.date] = metric.copy(
                 workoutCalories = existing?.workoutCalories ?: emptyMap(),
-                sleepSessionMinutes = existing?.sleepSessionMinutes ?: emptyMap(),
+                timeInBedMinutes = existing?.timeInBedMinutes ?: emptyMap(),
+                sleepAwakenings = existing?.sleepAwakenings ?: emptyMap(),
                 stepsTotal = metric.stepsTotal ?: existing?.stepsTotal,
                 stepsOHealth = metric.stepsOHealth ?: existing?.stepsOHealth,
                 caloriesOHealthKcal = metric.caloriesOHealthKcal ?: existing?.caloriesOHealthKcal,
@@ -77,12 +86,17 @@ class MetricsStore(context: android.content.Context) {
         }
     }
 
-    fun addSleepSession(date: LocalDate, key: String, minutes: Long) {
+    fun addSleepSession(date: LocalDate, key: String, minutes: Long, awakenings: Int?) {
         synchronized(lock) {
             val metrics = loadAll().toMutableMap()
             val existing = metrics[date] ?: DailyMetric(date = date)
             metrics[date] = existing.copy(
-                sleepSessionMinutes = existing.sleepSessionMinutes + (key to minutes),
+                timeInBedMinutes = existing.timeInBedMinutes + (key to minutes),
+                sleepAwakenings = if (awakenings == null) {
+                    existing.sleepAwakenings
+                } else {
+                    existing.sleepAwakenings + (key to awakenings)
+                },
                 updatedAt = Instant.now(),
             )
             prune(metrics)
@@ -138,7 +152,8 @@ class MetricsStore(context: android.content.Context) {
         caloriesOHealthKcal?.let { put("caloriesOHealthKcal", it) }
         caloriesCoveredMinutes?.let { put("caloriesCoveredMinutes", it) }
         put("workoutCalories", JSONObject(workoutCalories.mapValues { it.value ?: JSONObject.NULL }))
-        put("sleepSessionMinutes", JSONObject(sleepSessionMinutes))
+        put("timeInBedMinutes", JSONObject(timeInBedMinutes))
+        put("sleepAwakenings", JSONObject(sleepAwakenings))
         put("updatedAt", updatedAt.toString())
     }
 
@@ -152,7 +167,8 @@ class MetricsStore(context: android.content.Context) {
         // Files written before sessions were keyed hold only totals, which cannot be attributed to
         // sessions after the fact. Those days read back empty and refill on the next sync.
         workoutCalories = optJSONObject("workoutCalories").toDoubleMap(),
-        sleepSessionMinutes = optJSONObject("sleepSessionMinutes").toLongMap(),
+        timeInBedMinutes = optJSONObject("timeInBedMinutes").toLongMap(),
+        sleepAwakenings = optJSONObject("sleepAwakenings").toIntMap(),
         updatedAt = runCatching { Instant.parse(getString("updatedAt")) }.getOrElse { Instant.now() },
     )
 
@@ -166,6 +182,11 @@ class MetricsStore(context: android.content.Context) {
     private fun JSONObject?.toLongMap(): Map<String, Long> {
         if (this == null) return emptyMap()
         return keys().asSequence().associateWith { key -> optLong(key) }
+    }
+
+    private fun JSONObject?.toIntMap(): Map<String, Int> {
+        if (this == null) return emptyMap()
+        return keys().asSequence().associateWith { key -> optInt(key) }
     }
 
     private fun JSONObject.optLongOrNull(key: String): Long? =
@@ -226,12 +247,15 @@ class ReportCollector(
         sessionId: String,
         startTime: Instant,
         endTime: Instant,
-        actualSleepMinutes: Long?,
+        awakenings: Int?,
     ) {
-        val timeInBed = ChronoUnit.MINUTES.between(startTime, endTime).coerceAtLeast(0)
+        // OHealth counts the last minute of a session as its end rather than the minute after it,
+        // so a session it displays as 23:11-01:12 arrives here ending at 01:13. Matching that
+        // convention keeps every interval identical to the one shown on the watch.
+        val timeInBed = (ChronoUnit.MINUTES.between(startTime, endTime) - 1).coerceAtLeast(0)
         val date = endTime.atZone(zone).toLocalDate()
         val key = sessionId.ifEmpty { "$startTime|$endTime" }
-        metricsStore.addSleepSession(date, key, actualSleepMinutes ?: timeInBed)
+        metricsStore.addSleepSession(date, key, timeInBed, awakenings)
     }
 
     fun sessionWorkouts(): List<WorkoutMetric> = sessionWorkouts.toList()

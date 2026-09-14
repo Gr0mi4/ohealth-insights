@@ -35,11 +35,23 @@ This document defines how generated OHealth Insights reports should be interpret
 
 ## Sleep
 
-1. `sleepMinutes` is time actually asleep: awake stages inside the session window are excluded, which
-   is what the OHealth app shows.
-2. When Health Connect carries no stages for a session, the full time-in-bed window is used instead.
-   That value reads higher than the app and is not comparable with staged nights.
-3. Sessions are keyed by record id, so a night re-read by two overlapping ranges is counted once.
+1. `sleepMinutes` is **time in bed**, not time asleep. OHealth marks awake segments inside a night and
+   subtracts them from the total it displays, but Health Connect receives `stages=[]` for every
+   session, so that segmentation is never exported and cannot be recovered.
+2. Expect this to read a few minutes above the watch. On a measured night of three sessions the gap
+   was 8 minutes out of 425, about 2%, always in the same direction.
+3. Session boundaries match what the watch displays: OHealth treats the last minute of a session as
+   its end, so a session shown as 23:11-01:12 arrives as ending at 01:13 and is counted as 121
+   minutes, not 122.
+4. Sessions are keyed by record id, so a night re-read by two overlapping ranges is counted once.
+   A day may legitimately hold several sessions, including daytime sleep, and OHealth totals them
+   the same way.
+5. `awakenings` is an estimate derived from heart rate alone, not a measurement. At roughly one
+   sample every two minutes a brief awakening appears as one to three readings a few beats above the
+   night's own baseline. Treat it as a settled/broken signal for comparing nights, never as sleep
+   staging, and never quote the number as fact.
+6. No HRV data exists in this export (`HeartRateVariabilityRmssdRecord` is empty), so recovery
+   cannot be assessed the way a sleep tracker normally would.
 
 ## Exercise sessions versus training sessions
 
