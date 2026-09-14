@@ -683,12 +683,34 @@ class HealthExportEngine(
             writtenRecordIds = writtenRecordIds,
         )
 
-        var derived = exportDailyActivity(writer, range, label, granted, writtenDailyDates, reportCollector)
+        // Read once for the whole range: the daily totals and the per-workout figures are then two
+        // views of the same deduplicated records, and cannot disagree. Workouts are included in the
+        // span because a session may start before the first local day this range covers.
+        val zone = ZoneId.systemDefault()
+        val (localStart, localEnd) = localDayBounds(range, zone)
+        val calorieStart = (workouts.map { it.start } + localStart.atZone(zone).toInstant()).min()
+        val calorieEnd = (workouts.map { it.end } + localEnd.atZone(zone).toInstant()).max()
+        val calories = readOHealthCalories(
+            start = calorieStart,
+            end = calorieEnd,
+            label = "$label calories",
+            canReadActive = HealthPermission.getReadPermission(ActiveCaloriesBurnedRecord::class) in granted,
+            canReadTotal = HealthPermission.getReadPermission(TotalCaloriesBurnedRecord::class) in granted,
+        )
+
+        var derived = exportDailyActivity(
+            writer = writer,
+            range = range,
+            label = label,
+            granted = granted,
+            calories = calories,
+            writtenDailyDates = writtenDailyDates,
+            reportCollector = reportCollector,
+        )
         derived += exportWorkoutEnergy(
             writer = writer,
             workouts = workouts,
-            label = label,
-            granted = granted,
+            calories = calories,
             writtenWorkoutEnergyIds = writtenWorkoutEnergyIds,
             reportCollector = reportCollector,
         )
@@ -700,20 +722,15 @@ class HealthExportEngine(
         range: TimeWindow,
         label: String,
         granted: Set<String>,
+        calories: CalorieSamples,
         writtenDailyDates: MutableSet<LocalDate>,
         reportCollector: ReportCollector?,
     ): Long {
         val canReadSteps = HealthPermission.getReadPermission(StepsRecord::class) in granted
-        val canReadActiveCalories = HealthPermission.getReadPermission(ActiveCaloriesBurnedRecord::class) in granted
-        val canReadTotalCalories = HealthPermission.getReadPermission(TotalCaloriesBurnedRecord::class) in granted
-        if (!canReadSteps && !canReadActiveCalories && !canReadTotalCalories) return 0
+        if (!canReadSteps && calories.samples.isEmpty()) return 0
 
         val zone = ZoneId.systemDefault()
-        val localStart = LocalDateTime.ofInstant(range.start, zone).toLocalDate().atStartOfDay()
-        val localEnd = LocalDateTime.ofInstant(range.end.minusNanos(1), zone)
-            .toLocalDate()
-            .plusDays(1)
-            .atStartOfDay()
+        val (localStart, localEnd) = localDayBounds(range, zone)
         val windows = dailyAggregationWindows(localStart, localEnd)
         val deduplicatedSteps = if (canReadSteps) {
             windows.flatMapIndexed { index, window ->
@@ -746,13 +763,6 @@ class HealthExportEngine(
         } else {
             emptyMap()
         }
-        val calories = readOHealthCalories(
-            start = localStart.atZone(zone).toInstant(),
-            end = localEnd.atZone(zone).toInstant(),
-            label = "$label calories",
-            canReadActive = canReadActiveCalories,
-            canReadTotal = canReadTotalCalories,
-        )
         val caloriesByDate = calories.samples.groupBy { it.localDate }
 
         var written = 0L
@@ -947,6 +957,15 @@ class HealthExportEngine(
         } / 60
     }
 
+    private fun localDayBounds(range: TimeWindow, zone: ZoneId): Pair<LocalDateTime, LocalDateTime> {
+        val start = LocalDateTime.ofInstant(range.start, zone).toLocalDate().atStartOfDay()
+        val end = LocalDateTime.ofInstant(range.end.minusNanos(1), zone)
+            .toLocalDate()
+            .plusDays(1)
+            .atStartOfDay()
+        return start to end
+    }
+
     private fun dailyAggregationWindows(
         start: LocalDateTime,
         end: LocalDateTime,
@@ -961,33 +980,23 @@ class HealthExportEngine(
         return windows
     }
 
-    private suspend fun exportWorkoutEnergy(
+    private fun exportWorkoutEnergy(
         writer: BufferedWriter,
         workouts: List<SessionWindow>,
-        label: String,
-        granted: Set<String>,
+        calories: CalorieSamples,
         writtenWorkoutEnergyIds: MutableSet<String>,
         reportCollector: ReportCollector?,
     ): Long {
-        val canReadActiveCalories = HealthPermission.getReadPermission(ActiveCaloriesBurnedRecord::class) in granted
-        val canReadTotalCalories = HealthPermission.getReadPermission(TotalCaloriesBurnedRecord::class) in granted
-        if (!canReadActiveCalories && !canReadTotalCalories) return 0
+        if (calories.samples.isEmpty()) return 0
         var count = 0L
-        workouts.forEachIndexed { index, workout ->
+        workouts.forEach { workout ->
             val identity = workout.id.ifEmpty { "${workout.start}|${workout.end}" }
-            if (!writtenWorkoutEnergyIds.add(identity)) return@forEachIndexed
-            val result = runCatching {
-                readOHealthCalories(
-                    start = workout.start,
-                    end = workout.end,
-                    label = "$label workout calories ${index + 1}/${workouts.size}",
-                    canReadActive = canReadActiveCalories,
-                    canReadTotal = canReadTotalCalories,
-                )
+            if (!writtenWorkoutEnergyIds.add(identity)) return@forEach
+            // Containment is applied here rather than left to the time-range filter, whose handling
+            // of records overlapping the session edges would otherwise decide the figure.
+            val samples = calories.samples.filter {
+                !it.start.isBefore(workout.start) && !it.end.isAfter(workout.end)
             }
-            result.exceptionOrNull()?.let { if (it is CancellationException) throw it }
-            val calories = result.getOrNull()
-            val samples = calories?.samples.orEmpty()
             val caloriesOHealthKcal = if (samples.isEmpty()) null else samples.sumOf { it.kilocalories }
             writer.writeJsonLine(
                 jsonObject(
@@ -997,11 +1006,10 @@ class HealthExportEngine(
                     "endTime" to workout.end.toString(),
                     "title" to workout.title,
                     "caloriesOHealthKcal" to caloriesOHealthKcal,
-                    "caloriesOHealthRecordType" to calories?.recordType,
+                    "caloriesOHealthRecordType" to calories.recordType,
                     "caloriesOHealthRecordCount" to samples.size,
                     "caloriesOHealthCoveredMinutes" to samples.sumOf { it.minutes },
-                    "status" to if (result.isSuccess) "complete" else "failed",
-                    "message" to result.exceptionOrNull()?.message,
+                    "status" to "complete",
                 ),
             )
             reportCollector?.onWorkoutEnergy(
