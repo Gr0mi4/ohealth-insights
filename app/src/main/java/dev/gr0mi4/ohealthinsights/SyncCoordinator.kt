@@ -46,6 +46,9 @@ class SyncCoordinator(context: Context) {
         val autoUpload = canAutoUpload(diagnostic)
         val reportCollector = if (autoUpload || !diagnostic) ReportCollector(metricsStore) else null
 
+        // Collect the whole export in memory and write the metrics file once, on the way out. The
+        // commit runs even when the export fails, so a partial run keeps the days it did cover.
+        if (reportCollector != null) metricsStore.beginBatch()
         val summary = runCatching {
             HealthExportEngine(client, onStage).export(
                 destination = file,
@@ -55,6 +58,8 @@ class SyncCoordinator(context: Context) {
                 reportCollector = reportCollector,
                 requestedHistoryStartDate = syncState.historyStartDate(),
             )
+        }.also {
+            if (reportCollector != null) metricsStore.commitBatch()
         }.getOrElse { error ->
             file.delete()
             if (error is CancellationException) throw error

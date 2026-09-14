@@ -53,69 +53,93 @@ class MetricsStore(context: android.content.Context) {
     private val file = java.io.File(context.filesDir, "ohealth_daily_metrics.json")
     private val lock = Any()
 
-    fun upsertDaily(metric: DailyMetric) {
+    /**
+     * Set for the duration of an export, so the file is written once at the end.
+     *
+     * Every update used to read, parse, serialise and write the whole file: an initial sync covering
+     * three years did that about 2400 times to change one field at a time.
+     */
+    private var batch: MutableMap<LocalDate, DailyMetric>? = null
+
+    fun beginBatch() {
         synchronized(lock) {
+            if (batch == null) batch = loadAll().toMutableMap()
+        }
+    }
+
+    fun commitBatch() {
+        synchronized(lock) {
+            batch?.let { metrics ->
+                prune(metrics)
+                saveAll(metrics)
+            }
+            batch = null
+        }
+    }
+
+    private fun mutate(date: LocalDate, transform: (DailyMetric?) -> DailyMetric) {
+        synchronized(lock) {
+            val open = batch
+            if (open != null) {
+                open[date] = transform(open[date])
+                return
+            }
             val metrics = loadAll().toMutableMap()
-            val existing = metrics[metric.date]
-            metrics[metric.date] = metric.copy(
-                workoutCalories = existing?.workoutCalories ?: emptyMap(),
-                timeInBedMinutes = existing?.timeInBedMinutes ?: emptyMap(),
-                sleepAwakenings = existing?.sleepAwakenings ?: emptyMap(),
-                stepsTotal = metric.stepsTotal ?: existing?.stepsTotal,
-                stepsOHealth = metric.stepsOHealth ?: existing?.stepsOHealth,
-                caloriesOHealthKcal = metric.caloriesOHealthKcal ?: existing?.caloriesOHealthKcal,
-                caloriesCoveredMinutes = metric.caloriesCoveredMinutes ?: existing?.caloriesCoveredMinutes,
-                updatedAt = metric.updatedAt,
-            )
+            metrics[date] = transform(metrics[date])
             prune(metrics)
             saveAll(metrics)
         }
+    }
+
+    private fun read(): Map<LocalDate, DailyMetric> = synchronized(lock) { batch ?: loadAll() }
+
+    fun upsertDaily(metric: DailyMetric) = mutate(metric.date) { existing ->
+        metric.copy(
+            workoutCalories = existing?.workoutCalories ?: emptyMap(),
+            timeInBedMinutes = existing?.timeInBedMinutes ?: emptyMap(),
+            sleepAwakenings = existing?.sleepAwakenings ?: emptyMap(),
+            stepsTotal = metric.stepsTotal ?: existing?.stepsTotal,
+            stepsOHealth = metric.stepsOHealth ?: existing?.stepsOHealth,
+            caloriesOHealthKcal = metric.caloriesOHealthKcal ?: existing?.caloriesOHealthKcal,
+            caloriesCoveredMinutes = metric.caloriesCoveredMinutes ?: existing?.caloriesCoveredMinutes,
+            updatedAt = metric.updatedAt,
+        )
     }
 
     fun addWorkout(date: LocalDate, workout: WorkoutMetric) {
         val key = workout.sessionId.ifEmpty { "${workout.startTime}|${workout.endTime}" }
-        synchronized(lock) {
-            val metrics = loadAll().toMutableMap()
-            val existing = metrics[date] ?: DailyMetric(date = date)
-            metrics[date] = existing.copy(
-                workoutCalories = existing.workoutCalories + (key to workout.caloriesKcal),
+        mutate(date) { existing ->
+            val day = existing ?: DailyMetric(date = date)
+            day.copy(
+                workoutCalories = day.workoutCalories + (key to workout.caloriesKcal),
                 updatedAt = Instant.now(),
             )
-            prune(metrics)
-            saveAll(metrics)
         }
     }
 
     fun addSleepSession(date: LocalDate, key: String, minutes: Long, awakenings: Int?) {
-        synchronized(lock) {
-            val metrics = loadAll().toMutableMap()
-            val existing = metrics[date] ?: DailyMetric(date = date)
-            metrics[date] = existing.copy(
-                timeInBedMinutes = existing.timeInBedMinutes + (key to minutes),
+        mutate(date) { existing ->
+            val day = existing ?: DailyMetric(date = date)
+            day.copy(
+                timeInBedMinutes = day.timeInBedMinutes + (key to minutes),
                 sleepAwakenings = if (awakenings == null) {
-                    existing.sleepAwakenings
+                    day.sleepAwakenings
                 } else {
-                    existing.sleepAwakenings + (key to awakenings)
+                    day.sleepAwakenings + (key to awakenings)
                 },
                 updatedAt = Instant.now(),
             )
-            prune(metrics)
-            saveAll(metrics)
         }
     }
 
     fun recentDays(days: Int = 14): List<DailyMetric> {
-        synchronized(lock) {
-            val cutoff = LocalDate.now().minusDays(days.toLong() - 1)
-            return loadAll().values
-                .filter { !it.date.isBefore(cutoff) }
-                .sortedBy { it.date }
-        }
+        val cutoff = LocalDate.now().minusDays(days.toLong() - 1)
+        return read().values
+            .filter { !it.date.isBefore(cutoff) }
+            .sortedBy { it.date }
     }
 
-    fun allMetrics(): List<DailyMetric> = synchronized(lock) {
-        loadAll().values.sortedBy { it.date }
-    }
+    fun allMetrics(): List<DailyMetric> = read().values.sortedBy { it.date }
 
     private fun prune(metrics: MutableMap<LocalDate, DailyMetric>) {
         val cutoff = LocalDate.now().minusDays(RETENTION_DAYS.toLong())
@@ -137,12 +161,23 @@ class MetricsStore(context: android.content.Context) {
         }.getOrElse { emptyMap() }
     }
 
+    /**
+     * Writes through a temporary file and renames it over the original.
+     *
+     * A background sync can be killed at any point, and writing in place left a truncated file that
+     * [loadAll] then read as empty - silently discarding the retained history.
+     */
     private fun saveAll(metrics: Map<LocalDate, DailyMetric>) {
         val json = JSONObject()
         val array = JSONArray()
         metrics.values.sortedBy { it.date }.forEach { array.put(it.toJson()) }
         json.put("days", array)
-        file.writeText(json.toString(2))
+        val temp = java.io.File(file.parentFile, "${file.name}.tmp")
+        temp.writeText(json.toString(2))
+        if (!temp.renameTo(file)) {
+            file.writeText(temp.readText())
+            temp.delete()
+        }
     }
 
     private fun DailyMetric.toJson(): JSONObject = JSONObject().apply {
